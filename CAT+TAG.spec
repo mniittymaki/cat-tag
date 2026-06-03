@@ -1,9 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 datas = []
 binaries = []
 hiddenimports = ['nicegui', 'nicegui.ui', 'nicegui.elements', 'uvicorn', 'uvicorn.logging', 'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.websockets', 'uvicorn.lifespan', 'starlette', 'starlette.applications', 'starlette.routing', 'starlette.responses', 'starlette.staticfiles', 'webview', 'webview.platforms.cocoa', 'engineio.async_drivers', 'engineio.async_drivers.threading', 'socketio.async_drivers']
+
+# Collect package data (critical for NiceGUI + webview frozen apps)
+datas += collect_data_files('nicegui')
+datas += collect_data_files('starlette')
+datas += collect_data_files('aiofiles')
+
 tmp_ret = collect_all('minicat')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('nicegui')
@@ -11,7 +17,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['/Users/mniittymaki/minicat/minicat/ui/desktop.py'],
+    ['minicat/ui/desktop.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -41,7 +47,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['/Users/mniittymaki/minicat/assets/cat-tag.icns'],
+    icon=['assets/cat-tag.icns'],
 )
 coll = COLLECT(
     exe,
@@ -55,6 +61,6 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='CAT+TAG.app',
-    icon='/Users/mniittymaki/minicat/assets/cat-tag.icns',
+    icon='assets/cat-tag.icns',
     bundle_identifier=None,
 )
