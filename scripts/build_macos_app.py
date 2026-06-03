@@ -4,11 +4,12 @@ Build a standalone macOS .app bundle for CAT+TAG.
 
 This produces a native-looking macOS application you can drag to /Applications.
 
-Usage:
-    python scripts/build_macos_app.py
+Recommended usage (ensures correct virtualenv + deps):
+    uv run python scripts/build_macos_app.py
 
-Requirements:
+Alternative (if you have activated the .venv):
     uv pip install pyinstaller
+    python scripts/build_macos_app.py
 """
 
 import subprocess
@@ -24,6 +25,21 @@ APP_NAME = "CAT+TAG"
 def main():
     print("Building CAT+TAG macOS app bundle...")
     print("This may take a minute or two.\n")
+
+    # Robustness: ensure PyInstaller is available. Prefer uv environment.
+    try:
+        import PyInstaller  # noqa: F401
+    except ImportError:
+        print(
+            "PyInstaller not found. Installing via 'uv pip install pyinstaller' into the project environment..."
+        )
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "pyinstaller"], cwd=PROJECT_ROOT
+            )
+        except Exception:
+            print("Direct pip install failed. Trying 'uv pip install pyinstaller'...")
+            subprocess.check_call(["uv", "pip", "install", "pyinstaller"], cwd=PROJECT_ROOT)
 
     # Common hidden imports needed for NiceGUI + pywebview + our stack
     hidden_imports = [
@@ -92,11 +108,21 @@ def main():
     # The actual entry script
     cmd += [str(ENTRY)]
 
+    # Preserve the committed portable CAT+TAG.spec.
+    # PyInstaller's -m run will overwrite it in cwd with a generated version containing absolute paths.
+    spec_path = PROJECT_ROOT / "CAT+TAG.spec"
+    orig_spec = spec_path.read_bytes() if spec_path.exists() else None
+
     print("Running PyInstaller...\n")
     print("Command:", " ".join(cmd))
     print()
 
     subprocess.check_call(cmd, cwd=PROJECT_ROOT)
+
+    # Restore the clean committed .spec so the working tree stays clean and the repo version remains portable.
+    if orig_spec is not None:
+        spec_path.write_bytes(orig_spec)
+        print("  (Restored the portable CAT+TAG.spec from repo)")
 
     app_path = PROJECT_ROOT / "dist" / f"{APP_NAME}.app"
     print(f"\n✅ Built: {app_path}")
@@ -109,6 +135,8 @@ def main():
     print()
     print("To test the built app:")
     print(f"  open {app_path}")
+    print()
+    print("Next time, run with: uv run python scripts/build_macos_app.py  (recommended)")
 
 
 def _generate_icns_from_png(png_path: Path, icns_path: Path) -> None:

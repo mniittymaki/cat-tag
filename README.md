@@ -171,11 +171,10 @@ Demo assets (GIFs, screenshots) live in `assets/`. See `assets/README.md` for gu
 ## Building a Standalone macOS App
 
 ```bash
-uv pip install pyinstaller
-python scripts/build_macos_app.py
+uv run python scripts/build_macos_app.py
 ```
 
-The resulting `CAT+TAG.app` can be moved to `/Applications`.
+The script will ensure PyInstaller is installed in the project environment. The resulting `CAT+TAG.app` can be moved to `/Applications`.
 
 **Note:** Even with a bundled app, users will still need `ffmpeg` installed on their system (via Homebrew on macOS).
 
