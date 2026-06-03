@@ -10,7 +10,7 @@ authors = [
 ]
 dependencies = [
   "nicegui>=2.0",
-  "typer[all]>=0.12.0",
+  "typer>=0.12.0",
   "pillow>=10.0",
   "xxhash>=3.4",
   "pydantic>=2.7",
