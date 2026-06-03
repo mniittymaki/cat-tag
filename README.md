@@ -27,6 +27,8 @@ uv run minicat
 
 On first launch CAT+TAG automatically uses `~/CAT+TAG` as the catalog folder (created and initialized for you). Use the folder icon in the top bar ("Open Catalog") to switch to a different catalog location at any time. The choice is remembered.
 
+**No pre-built iOS or macOS app is provided in releases.** The packaged `.app` bundle (if any) must be built locally from source using the script above and comes with the limitations noted in the "Optional" section.
+
 ### Other platforms
 
 Install `ffmpeg` and `uv`, then:
@@ -168,7 +170,11 @@ New AI features live primarily in `minicat/ai/` (transcriber, journalist_cutter,
 
 Demo assets (GIFs, screenshots) live in `assets/`. See `assets/README.md` for guidelines.
 
-## Building a Standalone macOS App
+## Optional: Building a Standalone macOS App Bundle (experimental)
+
+This is **not required**. The primary and recommended way to run CAT+TAG is from source with `uv run minicat` (see Quick Start above). It works on macOS, Linux, and Windows.
+
+If you want a double-clickable `.app` bundle for macOS (for convenience/testing only):
 
 ```bash
 uv run python scripts/build_macos_app.py
@@ -176,7 +182,15 @@ uv run python scripts/build_macos_app.py
 
 The script will ensure PyInstaller is installed in the project environment. The resulting `CAT+TAG.app` can be moved to `/Applications`.
 
-**Note:** Even with a bundled app, users will still need `ffmpeg` installed on their system (via Homebrew on macOS).
+**Important limitations of the bundle:**
+- It is ad-hoc signed only (no Apple Developer certificate / notarization).
+- On first launch macOS will show a Gatekeeper warning ("cannot be opened because the developer cannot be verified").
+  - Right-click the .app → Open, or run: `xattr -cr /path/to/CAT+TAG.app`
+- You must still have `ffmpeg` installed and on your PATH (`brew install ffmpeg`).
+- The bundle is large (~80 MB) because it includes a full Python runtime + all dependencies.
+- For distribution to others you would need to sign + notarize it yourself.
+
+If the bundle does not launch for you, use the source method instead — it is more reliable during development.
 
 ## Roadmap / Coming Soon
 

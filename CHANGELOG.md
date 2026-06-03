@@ -8,7 +8,7 @@ All notable changes to CAT+TAG.
 - Narration budgeting controls (min/max seconds + min/max bridges) in both AI Journalist and AI Director generation dialogs. Prompt-injected and honored in all exports.
 - Language-matched rich script TXT exports: full headers, labels, SELECTED SEGMENTS, FULL transcript, reasons etc. always emitted in the exact language of the source transcript.
 - "Export File" (AI Journalist) and equivalent Director paths now always bundle the rich attributed Script/Story TXT even when no narration/VO is present.
-- First official macOS app bundle (`CAT+TAG.app`) built via PyInstaller + release asset.
+- Optional macOS app bundle build script improved (PyInstaller, auto-install, portable .spec restore). No pre-built binary is shipped in GitHub releases (build locally only if desired; comes with Gatekeeper caveats).
 
 ### Changed
 - **Left sidebar**: High-density professional video-editor aesthetic refactor (layout/spacing/typography only per strict 4-rule spec: p-0/m-0/gap-0 container, q-py-none min-h-[36px] + text-xs font-semibold tracking-wider headers, py-0.5/q-py-xs children + subtle indent, compact rounded badges + tight counters).
@@ -33,7 +33,7 @@ All notable changes to CAT+TAG.
 - Version 0.2.0.
 - Cleaned repo (backups/ dirs, .bak files, secrets removed from history).
 - .github/workflows/ci.yml fully reliable.
-- macOS app artifact attached to GitHub Release.
+- macOS bundle build script + release engineering (CI, no binary artifact published per feedback).
 
 See the v0.2.0 release notes on GitHub for the full narrative of every user-driven fix and verification round ("Is it now fixed 100%?", "Do everything!").
 
