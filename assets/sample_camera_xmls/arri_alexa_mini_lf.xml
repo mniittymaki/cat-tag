@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<arriMetadata version="3.0" xmlns="http://www.arri.com/camera/metadata"
+              xmlns:com.arri.camera="http://www.arri.com/camera">
+  <com.arri.camera.CameraModel>ALEXA Mini LF</com.arri.camera.CameraModel>
+  <com.arri.camera.CameraSerialNumber>A1234567</com.arri.camera.CameraSerialNumber>
+  <com.arri.camera.ExposureIndexAsa>800</com.arri.camera.ExposureIndexAsa>
+  <com.arri.camera.WhiteBalanceKelvin>5600</com.arri.camera.WhiteBalanceKelvin>
+  <com.arri.camera.ShutterAngle>172.8</com.arri.camera.ShutterAngle>
+  <com.arri.camera.LensType>ARRI Signature Prime 35mm</com.arri.camera.LensType>
+  <com.arri.camera.LensFocalLength>35</com.arri.camera.LensFocalLength>
+  <com.arri.camera.LensIris>2.8</com.arri.camera.LensIris>
+  <com.arri.camera.ColorGammaSxS>LOG-C</com.arri.camera.ColorGammaSxS>
+  <com.arri.camera.CameraClipName>A001C001_20250529</com.arri.camera.CameraClipName>
+</arriMetadata>

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<NonRealTimeMeta xmlns="urn:schemas-professionalDisc:nonRealTimeMeta:ver.2.20"
+    xmlns:lib="urn:schemas-professionalDisc:lib:ver.2.10"
+    lastUpdate="2025-10-17T12:22:48-07:00">
+    <TargetMaterial umidRef="060A2B340101010501010D4313000000BA85D2CB650906C978F505FFFE429474"/>
+    <Duration value="84"/>
+    <CreationDate value="2025-10-17T12:22:44-07:00"/>
+    <VideoFormat>
+        <VideoFrame videoCodec="AVC_3840_2160_H422IP@L51" captureFps="23.98p"/>
+    </VideoFormat>
+    <Device manufacturer="Sony" modelName="ILME-FX3A" serialNo="05001309"/>
+    <Lens modelName="FE 16-35mm F2.8 GM II"/>
+    <AcquisitionRecord>
+        <Group name="CameraUnitMetadataSet">
+            <Item name="CaptureGammaEquation" value="s-log3-cine"/>
+            <Item name="CaptureColorPrimaries" value="s-gamut3-cine"/>
+            <Item name="CodingEquations" value="rec709"/>
+        </Group>
+        <Group name="ImagerControlInformation">
+            <Item name="ISO" value="800"/>
+            <Item name="Iris" value="2.8"/>
+            <Item name="ShutterSpeed" value="1/50"/>
+            <Item name="WhiteBalance" value="5600K"/>
+        </Group>
+    </AcquisitionRecord>
+</NonRealTimeMeta>

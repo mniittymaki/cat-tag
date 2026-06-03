@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<REDMetadata version="5.0">
+  <RMDVersion>5.0</RMDVersion>
+  <ClipName>KOMODO_001_001</ClipName>
+  <MasterISO>800</MasterISO>
+  <Kelvin>5600</Kelvin>
+  <Tint>0.0</Tint>
+  <Exposure>0.0</Exposure>
+  <Contrast>1.0</Contrast>
+  <FLUT>0.0</FLUT>
+  <ColorSpace>REDWideGamutRGB</ColorSpace>
+  <Gamma>Log3G10</Gamma>
+  <CDL>
+    <Slope>1.0 1.0 1.0</Slope>
+    <Offset>0.0 0.0 0.0</Offset>
+    <Power>1.0 1.0 1.0</Power>
+    <Saturation>1.0</Saturation>
+  </CDL>
+  <LookName>Neutral</LookName>
+</REDMetadata>

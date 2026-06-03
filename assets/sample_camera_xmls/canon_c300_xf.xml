@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CanonMetadata xmlns="http://www.canon.com/ns/xf/1.0/">
+  <Clip>
+    <ClipName>C001_ABC123</ClipName>
+    <CreationDate>2025-01-15T14:30:00Z</CreationDate>
+  </Clip>
+  <Camera>
+    <Model>EOS C300 Mark III</Model>
+    <SerialNumber>123456789</SerialNumber>
+  </Camera>
+  <Shooting>
+    <ISO>800</ISO>
+    <ShutterSpeed>1/50</ShutterSpeed>
+    <FNumber>5.6</FNumber>
+    <WhiteBalance>5500</WhiteBalance>
+    <Gamma>Canon Log 3</Gamma>
+    <PictureProfile>Profile 1</PictureProfile>
+  </Shooting>
+  <Lens>
+    <Model>CN-E 24mm T1.5</Model>
+    <FocalLength>24</FocalLength>
+  </Lens>
+</CanonMetadata>

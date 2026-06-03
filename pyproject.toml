@@ -1,0 +1,60 @@
+[project]
+name = "minicat"
+version = "0.2.0"
+description = "CAT+TAG — Simple, effective local catalog for video files with thumbnails, storyboards, structured labeling (project/location/camera/date), and powerful search."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+  {name = "Mikko Niittymaki"}
+]
+dependencies = [
+  "nicegui>=2.0",
+  "typer[all]>=0.12.0",
+  "pillow>=10.0",
+  "xxhash>=3.4",
+  "pydantic>=2.7",
+  "python-dateutil>=2.9",
+  "aiosqlite>=0.20",
+  "rich>=13.0",
+  "pywebview>=5.0",          # Enables running as a native desktop window (no browser needed)
+  "google-genai>=1.0.0",  # Official Gemini SDK for AI vision (tag suggestions from storyboards)
+  "edge-tts>=6.0",          # Free, high-quality multilingual TTS (Microsoft Edge voices) for AI Director voiceovers
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.4",
+  "pytest>=8.0",
+  "mypy>=1.10",
+]
+tts = [
+  "piper-tts>=1.2.0",   # Fully offline high-quality neural TTS (local Piper voices). Used for AI Director voiceovers.
+]
+
+[project.scripts]
+minicat = "minicat.cli.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["minicat"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.4",
+    "pytest>=8.0",
+    "mypy>=1.10",
+]
