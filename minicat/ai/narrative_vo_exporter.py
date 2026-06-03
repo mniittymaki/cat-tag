@@ -27,42 +27,35 @@ This file (#3) is responsible for the most complex case: AI Director narrative v
 
 from __future__ import annotations
 
-import json
-import subprocess
 import xml.etree.ElementTree as ET
-from datetime import datetime
 from pathlib import Path
-from xml.dom import minidom
 from typing import Any
+from xml.dom import minidom
 
 # Re-export some helpers that the exporter needs
 from minicat.ai.director import get_narrative_sequence
-from minicat.ai.xmeml_exporter import (
-    get_media_start_offset_and_duration,
-    get_video_timebase,
-    _seconds_to_frames,
-)
-from minicat.ai.voiceover import (
-    generate_narration_audio_sync,
-    get_tts_status,
-    ensure_tts_ready_for_narration,
-    get_tts_provider,
-)
 
 # Shared multi-source helpers (exporter #2 foundation)
 from minicat.ai.multi_xmeml_exporter import (
-    prepare_director_sources,
-    _get_premiere_label_color,
     _build_mixed_sources_xmeml,
     get_audio_characteristics,
+    prepare_director_sources,
+)
+from minicat.ai.voiceover import (
+    generate_narration_audio_sync,
+    get_tts_provider,
+    get_tts_status,
+)
+from minicat.ai.xmeml_exporter import (
+    _seconds_to_frames,
+    get_media_start_offset_and_duration,
+    get_video_timebase,
 )
 
 # ---------------------------------------------------------------------------
 # Main public function (will eventually replace the one in app.py)
 # ---------------------------------------------------------------------------
 
-from pathlib import Path
-from typing import Any
 
 # This will eventually contain the full extracted and cleaned logic
 # from the previous nested export_multi_xml in app.py.
@@ -106,6 +99,7 @@ def export_narrative_vo_xmeml(
         try:
             from minicat.core.video import repair_director_version_with_transcripts
             from minicat.ui.app import get_state
+
             st = get_state()
             cat_root = getattr(st, "catalog_root", None) if st else None
             vids = getattr(st, "videos", None) or []
@@ -133,11 +127,13 @@ def export_narrative_vo_xmeml(
         else:
             # Always create a new dated subfolder inside default library for this export's files
             from minicat.core.settings import create_export_subfolder
-            suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:40] }"
+
+            suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:40]}"
             export_dir = create_export_subfolder(suggestion)
 
-        raw_name = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:30] }"
+        raw_name = f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:30]}"
         from minicat.core.settings import sanitize_for_filesystem
+
         name = sanitize_for_filesystem(raw_name, max_len=80)
         out_name = f"{name}.xml"
         out_path = export_dir / out_name
@@ -146,6 +142,7 @@ def export_narrative_vo_xmeml(
         # This ensures the full attributed script is always alongside the XML (and voiceovers when present).
         try:
             from minicat.ui.app import export_ai_director_multi_clip_script
+
             export_ai_director_multi_clip_script(ver, target_dir=export_dir)
         except Exception:
             # UI layer may not be available in all contexts (tests, CLI); ignore
@@ -157,7 +154,9 @@ def export_narrative_vo_xmeml(
 
         if generate_voiceover and not narration_as_titles and narration_bridges:
             status = get_tts_status()
-            print(f"[Narrative VO Exporter] TTS provider={status.get('provider')} status: {status.get('message')}")
+            print(
+                f"[Narrative VO Exporter] TTS provider={status.get('provider')} status: {status.get('message')}"
+            )
 
         if pregenerated_vo_files is not None:
             vo_files = pregenerated_vo_files
@@ -186,26 +185,31 @@ def export_narrative_vo_xmeml(
             # picture-only for now, matching previous behavior).
             cut_segments = []
             for seg in segs:
-                cut_segments.append({
-                    "source_in": seg.get("source_in") or seg.get("start"),
-                    "source_out": seg.get("source_out") or seg.get("end"),
-                    "text": seg.get("text", ""),
-                    "reason": seg.get("reason", "")
-                })
+                cut_segments.append(
+                    {
+                        "source_in": seg.get("source_in") or seg.get("start"),
+                        "source_out": seg.get("source_out") or seg.get("end"),
+                        "text": seg.get("text", ""),
+                        "reason": seg.get("reason", ""),
+                    }
+                )
 
             detected_timebase = get_video_timebase(source_list[0])
             from minicat.ai.xmeml_exporter import generate_xmeml
+
             generate_xmeml(
                 cut_segments=cut_segments,
                 source_video_path=source_list[0],
                 output_path=out_path,
                 sequence_name=f"AI Multi Cut - {ver.get('title', ver.get('version_id'))}",
-                narrative_summary=ver.get('narrative_summary'),
+                narrative_summary=ver.get("narrative_summary"),
                 timebase=detected_timebase,
             )
 
             if vo_files:
-                print(f"[Narrative VO Exporter] Single-source: generated {len(vo_files)} voiceover file(s) (XML is picture-only)")
+                print(
+                    f"[Narrative VO Exporter] Single-source: generated {len(vo_files)} voiceover file(s) (XML is picture-only)"
+                )
             return out_path
 
         else:
@@ -227,18 +231,25 @@ def export_narrative_vo_xmeml(
                 out_path.write_text(pretty_xml, encoding="utf-8")
 
                 if vo_files:
-                    print(f"[Narrative VO Exporter] Exported multi-source with {len(vo_files)} voiceover bridge(s)")
+                    print(
+                        f"[Narrative VO Exporter] Exported multi-source with {len(vo_files)} voiceover bridge(s)"
+                    )
                 if title_items:
-                    print(f"[Narrative VO Exporter] Exported with {len(title_items)} narration title(s)")
+                    print(
+                        f"[Narrative VO Exporter] Exported with {len(title_items)} narration title(s)"
+                    )
 
                 return out_path
 
             # If we reach here the builder produced nothing usable — surface a clear failure
-            raise RuntimeError("Narrative VO XMEML builder produced empty output for multi-source case")
+            raise RuntimeError(
+                "Narrative VO XMEML builder produced empty output for multi-source case"
+            )
 
     except Exception as ex:
         print(f"[Narrative VO Exporter #3] Preparation failed: {ex}")
         import traceback
+
         traceback.print_exc()
         return None
 
@@ -248,6 +259,7 @@ def export_narrative_vo_xmeml(
 # These are pure with respect to the AI Director version dict and are safe
 # to call from either the exporter or the UI dialog.
 # ---------------------------------------------------------------------------
+
 
 def _prepare_voiceover_bridges(
     *,
@@ -283,14 +295,20 @@ def _prepare_voiceover_bridges(
         provider = "local"
     if provider == "local":
         from minicat.ai.voiceover import ensure_piper_package
+
         if not ensure_piper_package():
-            print("[Narrative VO Exporter] Local (Piper) package not available (auto-install failed). "
-                  "Voiceover generation will fail with a clear error.")
+            print(
+                "[Narrative VO Exporter] Local (Piper) package not available (auto-install failed). "
+                "Voiceover generation will fail with a clear error."
+            )
     else:
         from minicat.ai.voiceover import ensure_google_tts_package
+
         if not ensure_google_tts_package():
-            print("[Narrative VO Exporter] Google TTS package not available (auto-install attempt failed). "
-                  "Voiceover generation will fail with a clear error.")
+            print(
+                "[Narrative VO Exporter] Google TTS package not available (auto-install attempt failed). "
+                "Voiceover generation will fail with a clear error."
+            )
 
     lang_to_use = voiceover_language or ver.get("narration_language") or "en"
 
@@ -330,17 +348,21 @@ def _prepare_voiceover_bridges(
             except Exception:
                 ainfo = {"channels": 1, "sample_rate": 44100}
 
-            vo_files.append({
-                "path": vo_p,
-                "text": bridge_text,
-                "index": i,
-                "duration": vo_duration,   # real duration from file
-                "sample_rate": ainfo.get("sample_rate", 44100),
-                "channels": ainfo.get("channels", 1),
-            })
+            vo_files.append(
+                {
+                    "path": vo_p,
+                    "text": bridge_text,
+                    "index": i,
+                    "duration": vo_duration,  # real duration from file
+                    "sample_rate": ainfo.get("sample_rate", 44100),
+                    "channels": ainfo.get("channels", 1),
+                }
+            )
         except Exception as vo_ex:
             print(f"[Narrative VO Exporter] Bridge {i} generation failed: {vo_ex}")
-            print("  → This bridge will be missing from the voiceover track (text titles may still be available).")
+            print(
+                "  → This bridge will be missing from the voiceover track (text titles may still be available)."
+            )
 
     if vo_files:
         print(f"[Narrative VO Exporter] Generated {len(vo_files)} voiceover bridge file(s)")
@@ -374,11 +396,13 @@ def _prepare_narration_title_items(
             if bridge_text:
                 words = len(bridge_text.split())
                 est_dur = max(2.0, words / 3.2)
-                title_items.append({
-                    "start": current_t,
-                    "duration": est_dur,
-                    "text": bridge_text,
-                })
+                title_items.append(
+                    {
+                        "start": current_t,
+                        "duration": est_dur,
+                        "text": bridge_text,
+                    }
+                )
                 current_t += est_dur
 
     return title_items
@@ -387,6 +411,7 @@ def _prepare_narration_title_items(
 # ---------------------------------------------------------------------------
 # Internal builders (to be filled in the next migration slices)
 # ---------------------------------------------------------------------------
+
 
 def _build_narrative_vo_mixed_xmeml(
     ver: dict[str, Any],
@@ -414,8 +439,6 @@ def _build_narrative_vo_mixed_xmeml(
     exploded mono tracks, links, etc. in a single place (#2) while #3 only
     owns the narration-specific layering.
     """
-    import xml.etree.ElementTree as ET
-    from xml.dom import minidom
 
     # 1. Base picture XML from the no-narration exporter (authoritative source)
     base_xml = _build_mixed_sources_xmeml(
@@ -449,11 +472,9 @@ def _build_narrative_vo_mixed_xmeml(
 
     # Current picture duration (we will extend it if we add VO after the picture)
     try:
-        pic_dur = int((sequence.find("duration").text or "0"))
+        pic_dur = int(sequence.find("duration").text or "0")
     except Exception:
         pic_dur = 0
-
-    current_f = pic_dur
 
     # === Narration-aware timeline injection ===
     # We compute the desired shifts and placements first (pure, safe).
@@ -464,13 +485,15 @@ def _build_narrative_vo_mixed_xmeml(
     clip_shifts_sec: list[float] = []
     vo_placements: list[tuple[float, dict]] = []
     vo_durs = []
-    for v in (vo_files or []):
+    for v in vo_files or []:
         d = float(v.get("duration", 0) or 0)
         if d <= 0:
             w = len((v.get("text") or "").split())
             d = max(2.0, w / 3.2)
         vo_durs.append(d)
-    title_durs = [float(t.get("duration", 0) or 3.0) for t in (title_items or [])] if title_items else []
+    title_durs = (
+        [float(t.get("duration", 0) or 3.0) for t in (title_items or [])] if title_items else []
+    )
     current_clip_base = 0.0
     preceding_nar = 0.0
     v_i = 0
@@ -513,8 +536,11 @@ def _build_narrative_vo_mixed_xmeml(
             if video_elem is not None:
                 vtrk = video_elem.find("track")
                 if vtrk is not None:
-                    vclips = [c for c in vtrk.findall("clipitem")
-                              if "-vo-" not in (c.get("id") or "") and "title-" not in (c.get("id") or "")]
+                    vclips = [
+                        c
+                        for c in vtrk.findall("clipitem")
+                        if "-vo-" not in (c.get("id") or "") and "title-" not in (c.get("id") or "")
+                    ]
                     for ii, vc in enumerate(vclips):
                         if ii >= len(clip_shifts_sec):
                             break
@@ -532,7 +558,11 @@ def _build_narrative_vo_mixed_xmeml(
                 if atracks:
                     # Picture audio lives in first exploded mono track only
                     pic_atrack = atracks[0]
-                    aclips = [c for c in pic_atrack.findall("clipitem") if "-vo-" not in (c.get("id") or "")]
+                    aclips = [
+                        c
+                        for c in pic_atrack.findall("clipitem")
+                        if "-vo-" not in (c.get("id") or "")
+                    ]
                     for ii, ac in enumerate(aclips):
                         if ii >= len(clip_shifts_sec):
                             break
@@ -550,14 +580,15 @@ def _build_narrative_vo_mixed_xmeml(
         if vo_files and audio_elem is not None:
             # Create the 3rd track as Voiceover
             vo_track = ET.SubElement(
-                audio_elem, "track",
+                audio_elem,
+                "track",
                 premiereTrackType="Voiceover",
                 TL_SQTrackAudioKeyframeStyle="0",
                 TL_SQTrackShy="0",
                 MZ_TrackTargeted="1",
                 TL_SQTrackExpandedHeight="41",
                 currentExplodedTrackIndex="2",
-                totalExplodedTrackCount="3"
+                totalExplodedTrackCount="3",
             )
 
             vo_track_index = 2
@@ -569,7 +600,7 @@ def _build_narrative_vo_mixed_xmeml(
             if not vo_timings:
                 current_t = 0.0
                 vo_idx = 0
-                for item in (get_narrative_sequence(ver) or []):
+                for item in get_narrative_sequence(ver) or []:
                     if item.get("type") == "clip":
                         dur = (item.get("source_out", 0) - item.get("source_in", 0)) or 0
                         current_t += max(0.0, dur)
@@ -612,7 +643,9 @@ def _build_narrative_vo_mixed_xmeml(
                 vo_dur_sec = vo_info.get("duration", 0.0)
                 if vo_dur_sec <= 0:
                     try:
-                        _, vdur = get_media_start_offset_and_duration(path_obj if hasattr(path_obj, "exists") else safe_path_str)
+                        _, vdur = get_media_start_offset_and_duration(
+                            path_obj if hasattr(path_obj, "exists") else safe_path_str
+                        )
                         vo_dur_sec = float(vdur) if vdur else 10.0
                     except Exception:
                         vo_dur_sec = 10.0
@@ -712,9 +745,9 @@ def _build_narrative_vo_mixed_xmeml(
             # Titles extend the overall sequence duration
             max_title_end = max(
                 (_seconds_to_frames(ti["start"] + ti["duration"], timebase) for ti in title_items),
-                default=0
+                default=0,
             )
-            final_dur = max(int((sequence.find("duration").text or "0")), max_title_end)
+            final_dur = max(int(sequence.find("duration").text or "0"), max_title_end)
             if sequence.find("duration") is not None:
                 sequence.find("duration").text = str(final_dur)
 
@@ -745,8 +778,11 @@ def _build_narrative_vo_mixed_xmeml(
         except Exception:
             pass
     except Exception as inj_ex:
-        print(f"[Narrative VO Exporter] Narration/VO injection into XML failed (will export base picture XML + the generated voiceover audio files): {inj_ex}")
+        print(
+            f"[Narrative VO Exporter] Narration/VO injection into XML failed (will export base picture XML + the generated voiceover audio files): {inj_ex}"
+        )
         import traceback
+
         traceback.print_exc()
         # Return the base (picture) XML so the export still produces a usable file.
         # The voiceover audio files (WAV for local Piper / MP3 for Google) were already written to the exports dir during generation.
@@ -776,4 +812,3 @@ def _build_narrative_vo_mixed_xmeml(
 #
 # Next: remove the remaining shims in app.py and delete the old prep
 # + emission code from the legacy once the new path has proven stable.
-

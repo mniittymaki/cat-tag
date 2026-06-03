@@ -27,27 +27,75 @@ from minicat.ai.director import (
     get_narrative_sequence,
 )
 from minicat.ai.narrative_vo_exporter import export_narrative_vo_xmeml
-from minicat.ai.voiceover import get_google_tts_status, get_tts_provider_display_name
+from minicat.ai.voiceover import get_google_tts_status
 
 
 def make_fake_multi_source_data():
     """Create richer fake multi-source interview material for realistic testing."""
     c1_segments = [
-        {"source_in": 8.2, "source_out": 14.7, "text": "I started working here in 2017. It was already under pressure, but people still believed in it."},
-        {"source_in": 18.9, "source_out": 26.4, "text": "The first round of cuts came in 2020. We lost three nurses on my ward in one month."},
-        {"source_in": 34.1, "source_out": 42.8, "text": "I remember one patient asking me why the night shift was always so short-staffed. I didn't know what to say."},
-        {"source_in": 51.6, "source_out": 59.3, "text": "Some of the younger staff left for better pay elsewhere. I understood why, but it hurt the team."},
-        {"source_in": 71.0, "source_out": 79.5, "text": "The last straw for me was when they closed the step-down unit. That was the safety valve."},
-        {"source_in": 94.2, "source_out": 101.8, "text": "I still come in early most days. I don't think the patients should suffer because of decisions made in an office."},
+        {
+            "source_in": 8.2,
+            "source_out": 14.7,
+            "text": "I started working here in 2017. It was already under pressure, but people still believed in it.",
+        },
+        {
+            "source_in": 18.9,
+            "source_out": 26.4,
+            "text": "The first round of cuts came in 2020. We lost three nurses on my ward in one month.",
+        },
+        {
+            "source_in": 34.1,
+            "source_out": 42.8,
+            "text": "I remember one patient asking me why the night shift was always so short-staffed. I didn't know what to say.",
+        },
+        {
+            "source_in": 51.6,
+            "source_out": 59.3,
+            "text": "Some of the younger staff left for better pay elsewhere. I understood why, but it hurt the team.",
+        },
+        {
+            "source_in": 71.0,
+            "source_out": 79.5,
+            "text": "The last straw for me was when they closed the step-down unit. That was the safety valve.",
+        },
+        {
+            "source_in": 94.2,
+            "source_out": 101.8,
+            "text": "I still come in early most days. I don't think the patients should suffer because of decisions made in an office.",
+        },
     ]
 
     c2_segments = [
-        {"source_in": 4.5, "source_out": 12.1, "text": "We had to make difficult decisions. The budget envelope was fixed by the ministry."},
-        {"source_in": 19.7, "source_out": 27.3, "text": "We did model the impact. We knew there would be pressure on the floor."},
-        {"source_in": 33.8, "source_out": 41.2, "text": "The priority was protecting acute care beds. That was the political reality."},
-        {"source_in": 48.9, "source_out": 57.6, "text": "I accept that front-line staff felt the consequences more than we anticipated."},
-        {"source_in": 65.4, "source_out": 72.0, "text": "There were proposals for targeted retention payments, but they didn't get approved."},
-        {"source_in": 81.3, "source_out": 88.7, "text": "In hindsight, the speed of the reductions was probably too aggressive."},
+        {
+            "source_in": 4.5,
+            "source_out": 12.1,
+            "text": "We had to make difficult decisions. The budget envelope was fixed by the ministry.",
+        },
+        {
+            "source_in": 19.7,
+            "source_out": 27.3,
+            "text": "We did model the impact. We knew there would be pressure on the floor.",
+        },
+        {
+            "source_in": 33.8,
+            "source_out": 41.2,
+            "text": "The priority was protecting acute care beds. That was the political reality.",
+        },
+        {
+            "source_in": 48.9,
+            "source_out": 57.6,
+            "text": "I accept that front-line staff felt the consequences more than we anticipated.",
+        },
+        {
+            "source_in": 65.4,
+            "source_out": 72.0,
+            "text": "There were proposals for targeted retention payments, but they didn't get approved.",
+        },
+        {
+            "source_in": 81.3,
+            "source_out": 88.7,
+            "text": "In hindsight, the speed of the reductions was probably too aggressive.",
+        },
     ]
 
     sources = [
@@ -70,19 +118,70 @@ def make_fake_multi_source_data():
 def make_fake_narrated_version():
     """Create a realistic version dict that includes narration bridges (for exporter #3 testing)."""
     segments = [
-        {"source_label": "C1", "source_in": 12.3, "source_out": 28.7, "text": "I started working here in 2017. It was already under pressure, but people still believed in it.", "source_path": "/tmp/test_c1.mp4"},
-        {"source_label": "C2", "source_in": 45.1, "source_out": 59.2, "text": "We had to make difficult decisions. The budget envelope was fixed by the ministry.", "source_path": "/tmp/test_c2.mp4"},
-        {"source_label": "C1", "source_in": 71.0, "source_out": 79.5, "text": "The last straw for me was when they closed the step-down unit. That was the safety valve.", "source_path": "/tmp/test_c1.mp4"},
-        {"source_label": "C3", "source_in": 92.4, "source_out": 108.1, "text": "I remember one patient asking me why the night shift was always so short-staffed.", "source_path": "/tmp/test_c3.mp4"},
+        {
+            "source_label": "C1",
+            "source_in": 12.3,
+            "source_out": 28.7,
+            "text": "I started working here in 2017. It was already under pressure, but people still believed in it.",
+            "source_path": "/tmp/test_c1.mp4",
+        },
+        {
+            "source_label": "C2",
+            "source_in": 45.1,
+            "source_out": 59.2,
+            "text": "We had to make difficult decisions. The budget envelope was fixed by the ministry.",
+            "source_path": "/tmp/test_c2.mp4",
+        },
+        {
+            "source_label": "C1",
+            "source_in": 71.0,
+            "source_out": 79.5,
+            "text": "The last straw for me was when they closed the step-down unit. That was the safety valve.",
+            "source_path": "/tmp/test_c1.mp4",
+        },
+        {
+            "source_label": "C3",
+            "source_in": 92.4,
+            "source_out": 108.1,
+            "text": "I remember one patient asking me why the night shift was always so short-staffed.",
+            "source_path": "/tmp/test_c3.mp4",
+        },
     ]
 
     narrative_elements = [
-        {"type": "clip", "source_label": "C1", "source_in": 12.3, "source_out": 28.7, "text": segments[0]["text"]},
-        {"type": "narration", "text": "This moment captures the initial optimism before the cuts began to bite."},
-        {"type": "clip", "source_label": "C2", "source_in": 45.1, "source_out": 59.2, "text": segments[1]["text"]},
-        {"type": "narration", "text": "The official rationale was presented as necessary and unavoidable."},
-        {"type": "clip", "source_label": "C1", "source_in": 71.0, "source_out": 79.5, "text": segments[2]["text"]},
-        {"type": "narration", "text": "For frontline staff, the loss of the step-down unit removed the last buffer."},
+        {
+            "type": "clip",
+            "source_label": "C1",
+            "source_in": 12.3,
+            "source_out": 28.7,
+            "text": segments[0]["text"],
+        },
+        {
+            "type": "narration",
+            "text": "This moment captures the initial optimism before the cuts began to bite.",
+        },
+        {
+            "type": "clip",
+            "source_label": "C2",
+            "source_in": 45.1,
+            "source_out": 59.2,
+            "text": segments[1]["text"],
+        },
+        {
+            "type": "narration",
+            "text": "The official rationale was presented as necessary and unavoidable.",
+        },
+        {
+            "type": "clip",
+            "source_label": "C1",
+            "source_in": 71.0,
+            "source_out": 79.5,
+            "text": segments[2]["text"],
+        },
+        {
+            "type": "narration",
+            "text": "For frontline staff, the loss of the step-down unit removed the last buffer.",
+        },
     ]
 
     version = {
@@ -119,7 +218,10 @@ def test_narrative_exporter():
     # Test modes
     modes = [
         ("Text Titles only (no TTS)", dict(narration_as_titles=True, generate_voiceover=False)),
-        ("Voiceover generation (uses current provider)", dict(generate_voiceover=True, narration_as_titles=False)),
+        (
+            "Voiceover generation (uses current provider)",
+            dict(generate_voiceover=True, narration_as_titles=False),
+        ),
     ]
 
     for label, kwargs in modes:
@@ -133,6 +235,7 @@ def test_narrative_exporter():
         except Exception as e:
             print(f"    ✗ Error: {e}")
             import traceback
+
             traceback.print_exc()
 
     print("\n" + "=" * 70)
@@ -241,15 +344,18 @@ def main():
                 print(f"    Segments ({len(segs)}):")
                 for s in segs[:4]:
                     src = s.get("source_label", "?")
-                    print(f"      [{src}] {s['source_in']:.1f}s–{s['source_out']:.1f}s: {s['text'][:70]}...")
+                    print(
+                        f"      [{src}] {s['source_in']:.1f}s–{s['source_out']:.1f}s: {s['text'][:70]}..."
+                    )
                 if len(segs) > 4:
-                    print(f"      ... and {len(segs)-4} more")
+                    print(f"      ... and {len(segs) - 4} more")
                 if v.get("narrative_elements"):
                     bridges = [e for e in v["narrative_elements"] if e.get("type") == "narration"]
                     print(f"    Narration bridges in elements: {len(bridges)}")
         except Exception as e:
             print(f"\n✗ Live call failed: {e}")
             import traceback
+
             traceback.print_exc()
     else:
         print("\n[4] Skipping live Gemini call (pass --live to attempt a real call).")
@@ -261,8 +367,12 @@ def main():
     if "--export-narrative" in sys.argv or "--narrative" in sys.argv:
         test_narrative_exporter()
     else:
-        print("\n[5] Skipping Exporter #3 test (pass --export-narrative to test narrative_vo_exporter).")
-        print("    This exercises voiceover generation (current TTS provider), titles-only mode, and full multi XMEML with narration bridges.")
+        print(
+            "\n[5] Skipping Exporter #3 test (pass --export-narrative to test narrative_vo_exporter)."
+        )
+        print(
+            "    This exercises voiceover generation (current TTS provider), titles-only mode, and full multi XMEML with narration bridges."
+        )
         print("    Useful for validating exporter #3 before using it from the UI.")
 
     print("\n" + "=" * 70)

@@ -16,13 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import tempfile
 import time
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 # --- Domain models (pure data) ---
+
 
 @dataclass
 @dataclass
@@ -31,6 +32,7 @@ class AITaggingProgress:
     Used by the import wizard to show progress without the background task
     touching the NiceGUI context directly.
     """
+
     total: int = 0
     completed: int = 0
     total_tags_added: int = 0
@@ -48,6 +50,7 @@ class NarrationVOProgress:
     performs all .text / .value / .close / notify / ui.update from the safe slot.
     This prevents "slot stack is empty" / "create UI from background task" errors.
     """
+
     value: float = 0.0
     status: str = "Preparing TTS for narration script..."
     detail: str = ""
@@ -59,10 +62,11 @@ class NarrationVOProgress:
 @dataclass
 class TranscriptionJob:
     """Represents one transcription (+ optional translation) job in the queue."""
+
     clip_id: int
     filename: str
     do_translate: bool = False
-    status: str = "queued"          # queued | running | done | error
+    status: str = "queued"  # queued | running | done | error
     message: str = ""
     started_at: float | None = None
 
@@ -92,6 +96,7 @@ def _notify_status_update() -> None:
 
 
 # --- Public API ---
+
 
 def get_transcription_jobs() -> list[TranscriptionJob]:
     """Return a copy of current jobs (safe for UI consumption)."""
@@ -136,9 +141,13 @@ def clear_completed_jobs() -> int:
 
 # --- Internal Worker Implementation ---
 
+
 def _ensure_transcription_worker() -> None:
     global _transcription_worker_task
-    if _transcription_worker_task is None or getattr(_transcription_worker_task, "done", lambda: True)():
+    if (
+        _transcription_worker_task is None
+        or getattr(_transcription_worker_task, "done", lambda: True)()
+    ):
         print("[Transcription] Starting background worker task...")
         _transcription_worker_task = asyncio.create_task(_transcription_worker())
 
@@ -148,17 +157,21 @@ async def _transcription_worker() -> None:
     print("[Transcription Worker] Worker coroutine has started running.")
 
     # Lazy imports to avoid circular dependencies at module load
-    from minicat.core import db
-    from minicat.core.models import SearchFilters
-    from minicat.core.video import ensure_cached_audio, save_transcription_srt, save_transcription_txt
     from minicat.ai.transcriber import (
         transcribe_audio_with_timestamps,
         translate_transcription_segments,
     )
+    from minicat.core import db
+    from minicat.core.models import SearchFilters
     from minicat.core.settings import (
         get_gemini_api_key,
         get_gemini_model,
         get_preference,
+    )
+    from minicat.core.video import (
+        ensure_cached_audio,
+        save_transcription_srt,
+        save_transcription_txt,
     )
 
     while True:
@@ -237,21 +250,41 @@ async def _transcription_worker() -> None:
 
                         # Save the translated TXT + SRT persistently (same as inspector translate path)
                         try:
-                            from minicat.core.video import save_transcription_txt, save_transcription_srt
+                            from minicat.core.video import (
+                                save_transcription_srt,
+                                save_transcription_txt,
+                            )
+
                             fps = getattr(clip, "fps", None)
                             base_tc = getattr(clip, "tc_start", None)
-                            save_transcription_txt(clip.id, state.catalog_root, translated, lang=default_lang, fps=fps, base_timecode=base_tc)
-                            save_transcription_srt(clip.id, state.catalog_root, translated, lang=default_lang, fps=fps, base_timecode=base_tc)
+                            save_transcription_txt(
+                                clip.id,
+                                state.catalog_root,
+                                translated,
+                                lang=default_lang,
+                                fps=fps,
+                                base_timecode=base_tc,
+                            )
+                            save_transcription_srt(
+                                clip.id,
+                                state.catalog_root,
+                                translated,
+                                lang=default_lang,
+                                fps=fps,
+                                base_timecode=base_tc,
+                            )
                         except Exception as save_ex:
-                            print(f"[Transcription] Failed to save translated TXT/SRT for {clip.id}: {save_ex}")
+                            print(
+                                f"[Transcription] Failed to save translated TXT/SRT for {clip.id}: {save_ex}"
+                            )
 
                         # Preserve original language info
                         trans_data = {
                             "original": {
                                 "language": getattr(clip, "original_language", None),
-                                "segments": clip.transcription_segments
+                                "segments": clip.transcription_segments,
                             },
-                            "translations": clip.translated_transcriptions
+                            "translations": clip.translated_transcriptions,
                         }
                         db.update_video_fields(
                             state.catalog_root,
@@ -270,6 +303,7 @@ async def _transcription_worker() -> None:
             # Temporary bridge: still call the old refresh mechanism during transition
             try:
                 from minicat.ui.app import refresh_all_ui
+
                 if state.selected and state.selected.id == job.clip_id:
                     refreshed = db.get_video_by_path(state.catalog_root, clip.path)
                     if refreshed:
@@ -282,7 +316,10 @@ async def _transcription_worker() -> None:
             job.status = "error"
             err_str = str(e)
             # Friendly messages for common bad media file cases (corrupted downloads, incomplete exports, etc.)
-            if "moov atom" in err_str.lower() or "invalid data found when processing input" in err_str.lower():
+            if (
+                "moov atom" in err_str.lower()
+                or "invalid data found when processing input" in err_str.lower()
+            ):
                 nice = "Source video file is corrupted or incomplete (moov atom missing). Replace with a valid copy and try again."
             elif "ffprobe failed" in err_str:
                 nice = "Could not read video metadata (ffprobe failed). The file may be damaged or in an unsupported format."
@@ -317,7 +354,9 @@ async def _run_transcription(
     # (20+ min) are complete. Gemini + sanitize handle long audio; the prompt
     # was updated to not assume short files.
     if job:
-        job.message = "Extracting transcription proxy audio (24 kHz mono AAC 64k + -3dB peak norm)..."
+        job.message = (
+            "Extracting transcription proxy audio (24 kHz mono AAC 64k + -3dB peak norm)..."
+        )
 
     audio_path = await asyncio.to_thread(
         ensure_audio_fn,
@@ -342,15 +381,19 @@ async def _run_transcription(
     # - If stored fps exists, use it as authoritative. We may still live-probe for logging/verification
     #   but will not overwrite.
     from minicat.core.video import confirm_video_framerate
+
     stored_fps = getattr(clip, "fps", None)
     if stored_fps and float(stored_fps) > 0:
         fps = float(stored_fps)
         if fps > 120 or fps < 1:
-            print(f"[Transcription] WARNING: stored fps {fps} on clip {getattr(clip, 'id', '?')} looks bogus, re-probing live...")
+            print(
+                f"[Transcription] WARNING: stored fps {fps} on clip {getattr(clip, 'id', '?')} looks bogus, re-probing live..."
+            )
             fps = confirm_video_framerate(clip.path)
             # backfill the corrected value
             try:
                 from minicat.core import db as _db
+
                 _db.update_video_fields(catalog_root, clip.id, fps=fps)
                 if hasattr(clip, "__dict__"):
                     clip.fps = fps
@@ -360,13 +403,17 @@ async def _run_transcription(
             except Exception as fix_ex:
                 print(f"[Transcription] Could not backfill corrected fps: {fix_ex}")
         else:
-            print(f"[Transcription] Using framerate confirmed at import time: {fps} fps (stored on clip {getattr(clip, 'id', '?')}, immutable after import)")
+            print(
+                f"[Transcription] Using framerate confirmed at import time: {fps} fps (stored on clip {getattr(clip, 'id', '?')}, immutable after import)"
+            )
         # Verify against live file for diagnostics (do not change stored value)
         try:
             live_fps = confirm_video_framerate(clip.path)
             if abs(live_fps - fps) > 0.05:
-                print(f"[Transcription] NOTE: live probe reports {live_fps} but stored (import-time) value is {fps}. "
-                      "Using stored value as canonical per 'confirmed at import and never changed' rule.")
+                print(
+                    f"[Transcription] NOTE: live probe reports {live_fps} but stored (import-time) value is {fps}. "
+                    "Using stored value as canonical per 'confirmed at import and never changed' rule."
+                )
             else:
                 print(f"[Transcription] Live probe matches stored import-time value ({live_fps}).")
         except Exception as probe_ex:
@@ -374,20 +421,27 @@ async def _run_transcription(
     else:
         # Legacy clip: confirm now by probing the video file
         fps = confirm_video_framerate(clip.path)
-        print(f"[Transcription] No framerate stored on legacy clip — confirmed now via live probe: {fps}")
+        print(
+            f"[Transcription] No framerate stored on legacy clip — confirmed now via live probe: {fps}"
+        )
         # Backfill so future transcriptions and the record treat it as "confirmed at import"
         try:
             from minicat.core import db as _db
+
             _db.update_video_fields(catalog_root, clip.id, fps=fps)
             # Update in-memory object too
             if hasattr(clip, "__dict__"):
                 clip.fps = fps  # type: ignore[attr-defined]
             elif hasattr(clip, "fps"):
                 setattr(clip, "fps", fps)
-            print(f"[Transcription] Backfilled framerate {fps} into DB for clip {getattr(clip, 'id', '?')} "
-                  "(one-time for legacy data; will be treated as immutable from now on).")
+            print(
+                f"[Transcription] Backfilled framerate {fps} into DB for clip {getattr(clip, 'id', '?')} "
+                "(one-time for legacy data; will be treated as immutable from now on)."
+            )
         except Exception as backfill_ex:
-            print(f"[Transcription] Could not backfill fps to DB (will still use probed value for this run): {backfill_ex}")
+            print(
+                f"[Transcription] Could not backfill fps to DB (will still use probed value for this run): {backfill_ex}"
+            )
 
     transcription_result = await asyncio.to_thread(
         transcribe_fn,
@@ -413,11 +467,14 @@ async def _run_transcription(
     # legitimate end-of-clip content.
     clip_dur = getattr(clip, "duration", None)
     try:
-        import subprocess
         import json as _json
+        import subprocess
+
         probe = subprocess.run(
             ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(audio_path)],
-            capture_output=True, text=True, timeout=10
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         adur = float(_json.loads(probe.stdout or "{}").get("format", {}).get("duration", 0) or 0)
     except Exception:
@@ -425,6 +482,7 @@ async def _run_transcription(
     max_dur = clip_dur or adur
 
     from minicat.ai.transcriber import sanitize_transcription_segments
+
     segments = sanitize_transcription_segments(segments, max_duration=max_dur)
 
     clip.transcription_segments = segments
@@ -435,12 +493,17 @@ async def _run_transcription(
     # Pass the detected language so YLE styling is applied for Finnish
     save_lang = detected_language or "original"
     try:
-        from minicat.core.video import save_transcription_txt, save_transcription_srt
+        from minicat.core.video import save_transcription_srt, save_transcription_txt
+
         # Use the fps we authoritatively chose above (import-time value or one-time legacy backfill).
         # This respects "confirmed at import and never be changed".
         base_tc = getattr(clip, "tc_start", None)
-        save_transcription_txt(clip.id, catalog_root, segments, lang=save_lang, fps=fps, base_timecode=base_tc)
-        save_transcription_srt(clip.id, catalog_root, segments, lang=save_lang, fps=fps, base_timecode=base_tc)
+        save_transcription_txt(
+            clip.id, catalog_root, segments, lang=save_lang, fps=fps, base_timecode=base_tc
+        )
+        save_transcription_srt(
+            clip.id, catalog_root, segments, lang=save_lang, fps=fps, base_timecode=base_tc
+        )
     except Exception as srt_ex:
         print(f"[Transcriptions] Failed to save transcript/SRT for clip {clip.id}: {srt_ex}")
 
@@ -448,12 +511,13 @@ async def _run_transcription(
     trans_data = {
         "original": {
             "language": detected_language or getattr(clip, "original_language", None),
-            "segments": segments
+            "segments": segments,
         },
-        "translations": getattr(clip, "translated_transcriptions", {}) or {}
+        "translations": getattr(clip, "translated_transcriptions", {}) or {},
     }
 
     import json as _json
+
     from minicat.core import db as _db
 
     _db.update_video_fields(

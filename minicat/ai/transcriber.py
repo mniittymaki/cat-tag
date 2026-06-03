@@ -81,6 +81,7 @@ def transcribe_audio_with_timestamps(
 
     # Use the proper google-genai Part object for binary/audio data
     from google.genai import types
+
     audio_part = types.Part.from_bytes(
         data=audio_bytes,
         mime_type=mime_type,
@@ -114,7 +115,9 @@ def transcribe_audio_with_timestamps(
             "Transcribe the COMPLETE audio from start to finish up to that exact duration. "
             "If there are genuine long silences, use larger gaps between segments rather than omitting content or bunching timestamps."
         )
-    guidelines.append("Text must be EXACT verbatim spoken words with zero editing or normalization (see the TRANSCRIBE VERBATIM rule at the top of the guidelines).")
+    guidelines.append(
+        "Text must be EXACT verbatim spoken words with zero editing or normalization (see the TRANSCRIBE VERBATIM rule at the top of the guidelines)."
+    )
     guidelines.append("Do not add explanations or markdown — return only the JSON object.")
 
     guidelines_text = "\n- ".join(guidelines)
@@ -170,11 +173,13 @@ FINAL REMINDER BEFORE YOU OUTPUT ANYTHING: The single most important rule is VER
         cleaned = []
         for seg in raw_segments:
             if isinstance(seg, dict) and "start" in seg and "end" in seg and "text" in seg:
-                cleaned.append({
-                    "start": _parse_to_seconds(seg["start"]),
-                    "end": _parse_to_seconds(seg["end"]),
-                    "text": str(seg["text"]).strip()
-                })
+                cleaned.append(
+                    {
+                        "start": _parse_to_seconds(seg["start"]),
+                        "end": _parse_to_seconds(seg["end"]),
+                        "text": str(seg["text"]).strip(),
+                    }
+                )
 
         # Sanitize immediately: fix inversions, clamp, sort, dedup.
         # This protects against Gemini timestamp hallucinations (very common on longer Finnish interviews).
@@ -214,9 +219,11 @@ FINAL REMINDER BEFORE YOU OUTPUT ANYTHING: The single most important rule is VER
                     needs_recovery = True
 
         if needs_recovery:
-            print(f"[Transcription] WARNING: First segment starts at {first_s:.1f}s (or end timestamps still collapsed) "
-                  f"on a {total_duration:.1f}s clip. Gemini likely missed the start or lost time sync. "
-                  "Running a targeted recovery pass...")
+            print(
+                f"[Transcription] WARNING: First segment starts at {first_s:.1f}s (or end timestamps still collapsed) "
+                f"on a {total_duration:.1f}s clip. Gemini likely missed the start or lost time sync. "
+                "Running a targeted recovery pass..."
+            )
             try:
                 rec_prompt = prompt + (
                     "\n\nYOUR PREVIOUS OUTPUT HAD BAD TIMESTAMPS.\n"
@@ -239,15 +246,21 @@ FINAL REMINDER BEFORE YOU OUTPUT ANYTHING: The single most important rule is VER
                     if text2.lower().startswith("json"):
                         text2 = text2[4:].strip()
                 data2 = json.loads(text2)
-                raw2 = data2.get("segments", []) if isinstance(data2, dict) else (data2 if isinstance(data2, list) else [])
+                raw2 = (
+                    data2.get("segments", [])
+                    if isinstance(data2, dict)
+                    else (data2 if isinstance(data2, list) else [])
+                )
                 rec = []
                 for seg in raw2:
                     if isinstance(seg, dict) and "start" in seg and "end" in seg and "text" in seg:
-                        rec.append({
-                            "start": _parse_to_seconds(seg["start"]),
-                            "end": _parse_to_seconds(seg["end"]),
-                            "text": str(seg["text"]).strip()
-                        })
+                        rec.append(
+                            {
+                                "start": _parse_to_seconds(seg["start"]),
+                                "end": _parse_to_seconds(seg["end"]),
+                                "text": str(seg["text"]).strip(),
+                            }
+                        )
                 rec = sanitize_transcription_segments(rec, max_duration=total_duration)
                 if fps and fps > 0:
                     for seg in rec:
@@ -268,7 +281,13 @@ FINAL REMINDER BEFORE YOU OUTPUT ANYTHING: The single most important rule is VER
                 rec_first = float(rec[0].get("start", 999999)) if rec else 999999
                 improved_start = rec_first < first_s - 5
                 improved_tail = False
-                if rec and len(rec) >= 5 and len(cleaned) >= 5 and total_duration and total_duration > 100:
+                if (
+                    rec
+                    and len(rec) >= 5
+                    and len(cleaned) >= 5
+                    and total_duration
+                    and total_duration > 100
+                ):
                     p_tail = [float(s.get("start", 0) or 0) for s in cleaned[-5:]]
                     r_tail = [float(s.get("start", 0) or 0) for s in rec[-5:]]
                     p_span = max(p_tail) - min(p_tail) if p_tail else 0
@@ -277,20 +296,25 @@ FINAL REMINDER BEFORE YOU OUTPUT ANYTHING: The single most important rule is VER
                         improved_tail = True
                 if rec and (improved_start or improved_tail):
                     if improved_tail and not improved_start:
-                        print("[Transcription] Recovery improved the collapsed end timestamps — adopting recovered segments.")
+                        print(
+                            "[Transcription] Recovery improved the collapsed end timestamps — adopting recovered segments."
+                        )
                     else:
-                        print("[Transcription] Recovery produced a clearly better (earlier) start — adopting recovered segments.")
+                        print(
+                            "[Transcription] Recovery produced a clearly better (earlier) start — adopting recovered segments."
+                        )
                     cleaned = rec
                 else:
-                    print("[Transcription] Recovery did not improve the start time over the primary (repaired) result; keeping primary.")
+                    print(
+                        "[Transcription] Recovery did not improve the start time over the primary (repaired) result; keeping primary."
+                    )
             except Exception as rec_ex:
-                print(f"[Transcription] Recovery pass encountered an error (will use the primary + repaired segments): {rec_ex}")
+                print(
+                    f"[Transcription] Recovery pass encountered an error (will use the primary + repaired segments): {rec_ex}"
+                )
 
         # Return both the segments and the detected language
-        return {
-            "segments": cleaned,
-            "language": detected_lang.lower() if detected_lang else None
-        }
+        return {"segments": cleaned, "language": detected_lang.lower() if detected_lang else None}
 
     except Exception as e:
         raise RuntimeError(f"Gemini transcription failed: {e}") from e
@@ -368,11 +392,13 @@ Input:
         cleaned = []
         for item in translated:
             if isinstance(item, dict) and "start" in item and "end" in item and "text" in item:
-                cleaned.append({
-                    "start": _parse_to_seconds(item["start"]),
-                    "end": _parse_to_seconds(item["end"]),
-                    "text": str(item["text"]).strip()
-                })
+                cleaned.append(
+                    {
+                        "start": _parse_to_seconds(item["start"]),
+                        "end": _parse_to_seconds(item["end"]),
+                        "text": str(item["text"]).strip(),
+                    }
+                )
 
         # Always sanitize translated output too (catches any bad times the translator
         # might have echoed, and applies the trailing-junk pruning using the known max).
@@ -396,6 +422,7 @@ Input:
 #    translation, and as a fallback when the model doesn't perfectly follow the
 #    strict rules.
 # =============================================================================
+
 
 def _break_text_into_lines(text: str, max_chars: int = 39) -> list[str]:
     """
@@ -556,9 +583,11 @@ def _parse_to_seconds(ts: str | float | int | None) -> float:
     return 0.0
 
 
-def _split_long_segment_by_words(seg: dict[str, Any], max_words: int = 12, max_duration: float = 5.5) -> list[dict[str, Any]]:
+def _split_long_segment_by_words(
+    seg: dict[str, Any], max_words: int = 12, max_duration: float = 5.5
+) -> list[dict[str, Any]]:
     """
-    Programmatic fallback safeguard: Splits an excessively long transcription segment 
+    Programmatic fallback safeguard: Splits an excessively long transcription segment
     into granular pieces using linear interpolation based on character length.
     Ensures the AI Director never receives massive uncut blocks.
     """
@@ -568,59 +597,59 @@ def _split_long_segment_by_words(seg: dict[str, Any], max_words: int = 12, max_d
         end = float(seg["end"])
     except (KeyError, ValueError, TypeError):
         return [seg]
-        
+
     duration = end - start
     words = text.split()
-    
+
     if len(words) <= max_words and duration <= max_duration:
         return [seg]
-        
+
     # Decide number of pieces: respect both word limit and (more importantly for editing)
     # the max time per segment. Time-based splitting ensures slow speech with few words
     # still gets broken into bite-sized pieces for the AI Director.
     word_pieces = max(1, (len(words) + max_words - 1) // max_words)
-    time_pieces = max(1, int(duration / max_duration) + (1 if (duration % max_duration) > 0.1 else 0))
+    time_pieces = max(
+        1, int(duration / max_duration) + (1 if (duration % max_duration) > 0.1 else 0)
+    )
     num_pieces = max(word_pieces, time_pieces)
-    
+
     if num_pieces <= 1:
         return [seg]
-    
+
     # Distribute words as evenly as possible across the required number of pieces
     chunks = []
     if num_pieces > 0 and words:
         chunk_size = max(1, (len(words) + num_pieces - 1) // num_pieces)
         for i in range(0, len(words), chunk_size):
-            ch = words[i:i + chunk_size]
+            ch = words[i : i + chunk_size]
             if ch:
                 chunks.append(" ".join(ch))
-    
+
     if not chunks:
         return [seg]
-        
+
     # Linearly interpolate timestamps based on character length weighting
     total_chars = sum(len(c) for c in chunks)
     if total_chars <= 0:
         return [seg]
-        
+
     sub_segments = []
     current_start = start
-    
+
     for chunk in chunks:
         chunk_len = len(chunk)
         chunk_dur = (chunk_len / total_chars) * duration
         chunk_end = current_start + chunk_dur
-        
-        sub_segments.append({
-            "start": round(current_start, 3),
-            "end": round(min(chunk_end, end), 3),
-            "text": chunk
-        })
+
+        sub_segments.append(
+            {"start": round(current_start, 3), "end": round(min(chunk_end, end), 3), "text": chunk}
+        )
         current_start = chunk_end
-        
+
     # Hard lock the final sub-segment back to the original boundaries
     if sub_segments:
         sub_segments[-1]["end"] = round(end, 3)
-        
+
     return sub_segments
 
 
@@ -677,8 +706,10 @@ def sanitize_transcription_segments(
     for item in cleaned:
         if deduped:
             prev = deduped[-1]
-            if (abs(item["start"] - prev["start"]) < 0.5 and
-                item["text"].lower() == prev["text"].lower()):
+            if (
+                abs(item["start"] - prev["start"]) < 0.5
+                and item["text"].lower() == prev["text"].lower()
+            ):
                 # extend previous if this one is longer
                 if item["end"] > prev["end"]:
                     prev["end"] = item["end"]
@@ -712,9 +743,31 @@ def sanitize_transcription_segments(
             # Common single-word acknowledgments / fillers in EN/FI that the model loves to
             # place at the forced end timestamp when it has given up on the middle.
             short_fillers = {
-                "joo", "joo.", "kyllä", "kyllä.", "mm", "mmm", "hmm", "em", "niin",
-                "aivan", "totta", "no", "no.", "ok", "okay", "yeah", "yea", "yep",
-                "right", "uh", "um", "mhm", "aha", "juu", "kjoo"
+                "joo",
+                "joo.",
+                "kyllä",
+                "kyllä.",
+                "mm",
+                "mmm",
+                "hmm",
+                "em",
+                "niin",
+                "aivan",
+                "totta",
+                "no",
+                "no.",
+                "ok",
+                "okay",
+                "yeah",
+                "yea",
+                "yep",
+                "right",
+                "uh",
+                "um",
+                "mhm",
+                "aha",
+                "juu",
+                "kjoo",
             }
 
             looks_like_padding = True
@@ -729,10 +782,12 @@ def sanitize_transcription_segments(
             if gap > 45.0 and looks_like_padding:
                 dropped = len(trailing)
                 deduped = deduped[: last_real_idx + 1]
-                print(f"[Sanitize] Pruned {dropped} degenerate trailing filler segment(s) "
-                      f"(gap {gap:.1f}s before them on a long clip). This usually means "
-                      "Gemini stopped transcribing mid-recording and tried to satisfy "
-                      "the 'use the full duration' instruction with a token at the end.")
+                print(
+                    f"[Sanitize] Pruned {dropped} degenerate trailing filler segment(s) "
+                    f"(gap {gap:.1f}s before them on a long clip). This usually means "
+                    "Gemini stopped transcribing mid-recording and tried to satisfy "
+                    "the 'use the full duration' instruction with a token at the end."
+                )
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
@@ -768,8 +823,7 @@ def sanitize_transcription_segments(
                 # Decide whether this is a normal middle bunch (forward from AI time)
                 # or a crammed tail that needs backward layout from clip end.
                 is_crammed_tail = bool(
-                    max_duration and max_duration > 30 and
-                    base_start >= (max_duration - 5.0)
+                    max_duration and max_duration > 30 and base_start >= (max_duration - 5.0)
                 )
                 rate = 14.0
                 natural = []
@@ -789,7 +843,7 @@ def sanitize_transcription_segments(
                     cur_t = min(max_duration, float(group[-1].get("end") or max_duration))
                     assigned = []
                     for nat_start, nat_end, txt in reversed(natural):
-                        dur = (nat_end - nat_start)
+                        dur = nat_end - nat_start
                         e = cur_t
                         s = cur_t - dur
                         if max_duration:
@@ -800,11 +854,17 @@ def sanitize_transcription_segments(
                     assigned.reverse()
                     for s, e, txt in assigned:
                         new_list.append({"start": s, "end": e, "text": txt})
-                    print(f"[Sanitize] Re-anchored {len(group)} tail segments *backward* from clip end "
-                          f"(AI had crammed them at {base_start:.1f}s; now .txt/.srt show advancing TC).")
+                    print(
+                        f"[Sanitize] Re-anchored {len(group)} tail segments *backward* from clip end "
+                        f"(AI had crammed them at {base_start:.1f}s; now .txt/.srt show advancing TC)."
+                    )
                 else:
                     # Original forward local spread for non-tail bunches.
-                    if max_duration and last_natural_end > max_duration and last_natural_end > base_start:
+                    if (
+                        max_duration
+                        and last_natural_end > max_duration
+                        and last_natural_end > base_start
+                    ):
                         scale = (max_duration - base_start) / (last_natural_end - base_start)
                         scale = max(0.1, min(1.0, scale))
                     else:
@@ -812,15 +872,17 @@ def sanitize_transcription_segments(
                     cur_t = base_start
                     for nat_start, nat_end, txt in natural:
                         dur = (nat_end - nat_start) * scale
-                        e = min(max_duration or (cur_t + dur + 1), cur_t + dur) if max_duration else (cur_t + dur)
-                        new_list.append({
-                            "start": round(cur_t, 3),
-                            "end": round(e, 3),
-                            "text": txt
-                        })
+                        e = (
+                            min(max_duration or (cur_t + dur + 1), cur_t + dur)
+                            if max_duration
+                            else (cur_t + dur)
+                        )
+                        new_list.append({"start": round(cur_t, 3), "end": round(e, 3), "text": txt})
                         cur_t = e + 0.05
-                    print(f"[Sanitize] Locally spread {len(group)} segments that AI gave identical "
-                          f"start {base_start:.3f}s (AI time used as anchor; turned into distinct TIMECODE).")
+                    print(
+                        f"[Sanitize] Locally spread {len(group)} segments that AI gave identical "
+                        f"start {base_start:.3f}s (AI time used as anchor; turned into distinct TIMECODE)."
+                    )
             else:
                 new_list.append(deduped[i])
             i = j
@@ -830,14 +892,18 @@ def sanitize_transcription_segments(
     if deduped and max_duration and max_duration > 60:
         first_start = float(deduped[0].get("start", 0) or 0)
         if first_start > 45:
-            print(f"[Sanitize] WARNING: Transcription starts late (first segment at {first_start:.1f}s on a {max_duration:.1f}s clip). "
-                  "Gemini likely skipped the beginning of the recording. Re-transcribe or check the source audio for early speech. "
-                  "The .txt/.srt will only show content from the first captured utterance onward.")
+            print(
+                f"[Sanitize] WARNING: Transcription starts late (first segment at {first_start:.1f}s on a {max_duration:.1f}s clip). "
+                "Gemini likely skipped the beginning of the recording. Re-transcribe or check the source audio for early speech. "
+                "The .txt/.srt will only show content from the first captured utterance onward."
+            )
 
     # ENHANCED SAFENET: Guard against escaped long blocks by forcing a programmatic split pass
     final_granular_list = []
     for seg in deduped:
-        final_granular_list.extend(_split_long_segment_by_words(seg, max_words=12, max_duration=5.5))
+        final_granular_list.extend(
+            _split_long_segment_by_words(seg, max_words=12, max_duration=5.5)
+        )
 
     return final_granular_list
 
@@ -937,10 +1003,10 @@ def format_for_finnish_broadcast(
         # When there is enough time we use the preferred gap. When space is tight we
         # compress durations but *never* reduce the gap below the hard minimum.
 
-        max_overrun = 1.8                    # Allow the last subtitle a bit of extra linger time
+        max_overrun = 1.8  # Allow the last subtitle a bit of extra linger time
         preferred_gap = gap_between_subtitles
-        hard_min_gap = 0.12                  # <<< Hard guarantee: at least 120ms separation between blocks
-                                             # (increased from 0.10 to eliminate tiny visual overlaps when burned)
+        hard_min_gap = 0.12  # <<< Hard guarantee: at least 120ms separation between blocks
+        # (increased from 0.10 to eliminate tiny visual overlaps when burned)
 
         # Reserve the minimum required separation time
         min_gaps_time = (n - 1) * hard_min_gap
@@ -959,8 +1025,10 @@ def format_for_finnish_broadcast(
             # Scale durations down so the blocks + hard_min_gaps fit.
             available_for_blocks = max_total_time - min_gaps_time
             scale = max(available_for_blocks, n * min_duration) / total_ideal_block
-            final_durations = [max(min_duration, min(d * scale, max_duration)) for d in block_durations]
-            effective_gap = hard_min_gap   # never go below the hard separation
+            final_durations = [
+                max(min_duration, min(d * scale, max_duration)) for d in block_durations
+            ]
+            effective_gap = hard_min_gap  # never go below the hard separation
 
         # Lay out the blocks with the chosen (guaranteed positive) gap.
         # This ensures: block[i].end + effective_gap <= block[i+1].start
@@ -973,11 +1041,13 @@ def format_for_finnish_broadcast(
                 block_start = round(block_start * fps) / fps
                 block_end = round(block_end * fps) / fps
 
-            result.append({
-                "start": _seconds_to_srt_time(block_start),
-                "end": _seconds_to_srt_time(block_end),
-                "text": _sanitize_subtitle_text(block),
-            })
+            result.append(
+                {
+                    "start": _seconds_to_srt_time(block_start),
+                    "end": _seconds_to_srt_time(block_end),
+                    "text": _sanitize_subtitle_text(block),
+                }
+            )
 
             current_time = block_end + effective_gap
 
@@ -986,7 +1056,7 @@ def format_for_finnish_broadcast(
         # This catches any floating-point or rounding issues that could cause tiny overlaps
         # when the subtitles are rendered or burned.
         for i in range(1, len(result)):
-            prev_end = _parse_time_to_seconds(result[i-1]["end"])
+            prev_end = _parse_time_to_seconds(result[i - 1]["end"])
             curr_start = _parse_time_to_seconds(result[i]["start"])
             if curr_start < prev_end + hard_min_gap:
                 shift = (prev_end + hard_min_gap) - curr_start
@@ -1055,11 +1125,13 @@ def source_transcript_to_srt_segments(
             if fps and fps > 0:
                 bs = round(bs * fps) / fps
                 be = round(be * fps) / fps
-            result.append({
-                "start": bs,
-                "end": be,
-                "text": _sanitize_subtitle_text(blocks[0]),
-            })
+            result.append(
+                {
+                    "start": bs,
+                    "end": be,
+                    "text": _sanitize_subtitle_text(blocks[0]),
+                }
+            )
         else:
             # Lightly subdivide the spoken window for this utterance
             min_gaps = (n - 1) * hard_min_gap
@@ -1072,17 +1144,25 @@ def source_transcript_to_srt_segments(
                 if fps and fps > 0:
                     bs = round(bs * fps) / fps
                     be = round(be * fps) / fps
-                result.append({
-                    "start": bs,
-                    "end": be,
-                    "text": _sanitize_subtitle_text(b),
-                })
+                result.append(
+                    {
+                        "start": bs,
+                        "end": be,
+                        "text": _sanitize_subtitle_text(b),
+                    }
+                )
                 cur = be + hard_min_gap
 
     return result
 
 
-def segments_to_srt(segments: list[dict[str, Any]], *, strict_timing: bool = False, fps: float | None = None, base_timecode: str | None = None) -> str:
+def segments_to_srt(
+    segments: list[dict[str, Any]],
+    *,
+    strict_timing: bool = False,
+    fps: float | None = None,
+    base_timecode: str | None = None,
+) -> str:
     """
     Convert timed segments to standard .srt.
 
@@ -1109,11 +1189,19 @@ def segments_to_srt(segments: list[dict[str, Any]], *, strict_timing: bool = Fal
     # SRT parsers skip leading non-block lines; the first "1" starts the real content.
     if fps and fps > 0:
         fps_str = f"{fps:.3f}".rstrip("0").rstrip(".")
-        lines.append(f"# CAT+TAG subtitles - generated for {fps_str} fps source media (r_frame_rate from original file)")
-        lines.append("# Event times are real seconds from media head (00:00:00.000), quantized to exact video frame boundaries.")
+        lines.append(
+            f"# CAT+TAG subtitles - generated for {fps_str} fps source media (r_frame_rate from original file)"
+        )
+        lines.append(
+            "# Event times are real seconds from media head (00:00:00.000), quantized to exact video frame boundaries."
+        )
         if base_timecode and base_timecode not in (None, "00:00:00:00"):
-            lines.append(f"# Clip embedded start timecode: {base_timecode} (SRT timings above are media-head relative for correct import/alignment when attached to this clip).")
-        lines.append("# In Premiere Pro the asset often shows a default '30 fps' label (cosmetic). Right-click the .srt in Project panel > Modify > Interpret Footage > 'Assume this frame rate' and enter the source fps (e.g. 25.000) to match your 25 fps media.")
+            lines.append(
+                f"# Clip embedded start timecode: {base_timecode} (SRT timings above are media-head relative for correct import/alignment when attached to this clip)."
+            )
+        lines.append(
+            "# In Premiere Pro the asset often shows a default '30 fps' label (cosmetic). Right-click the .srt in Project panel > Modify > Interpret Footage > 'Assume this frame rate' and enter the source fps (e.g. 25.000) to match your 25 fps media."
+        )
         lines.append("")
 
     for i, seg in enumerate(formatted, 1):
@@ -1169,7 +1257,7 @@ def _seconds_to_srt_time(seconds: float) -> str:
 
 
 def ai_journalist_cut_to_srt_segments(
-    selected_segments: list[dict[str, Any]]
+    selected_segments: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
     Convert AI Journalist selected_segments (in the AI-chosen narrative order)
@@ -1201,11 +1289,7 @@ def ai_journalist_cut_to_srt_segments(
 
         dur = max(0.01, e - s)
         text = (seg.get("text") or seg.get("reason") or "").strip()
-        result.append({
-            "start": timeline_pos,
-            "end": timeline_pos + dur,
-            "text": text
-        })
+        result.append({"start": timeline_pos, "end": timeline_pos + dur, "text": text})
         timeline_pos += dur
 
     return result
@@ -1292,11 +1376,7 @@ def ai_journalist_cut_to_yle_srt_segments(
             block_start = current
             block_end = current + d
 
-            result.append({
-                "start": block_start,
-                "end": block_end,
-                "text": block
-            })
+            result.append({"start": block_start, "end": block_end, "text": block})
             current = block_end + hard_min_gap
 
         timeline_pos += dur
@@ -1304,7 +1384,9 @@ def ai_journalist_cut_to_yle_srt_segments(
     return result
 
 
-def segments_to_ass(segments: list[dict[str, Any]], *, title: str = "Subtitles", fps: float | None = None) -> str:
+def segments_to_ass(
+    segments: list[dict[str, Any]], *, title: str = "Subtitles", fps: float | None = None
+) -> str:
     """
     Convert timed segments into high-quality EBU-style .ass subtitles
     following Yle (Finnish Broadcasting Company) guidelines.
@@ -1397,14 +1479,14 @@ def parse_transcription_txt_to_segments(txt_path: Path | str) -> list[dict[str, 
     #   [11:43:09:24 (0.9s) → 11:43:10:20 (1.8s)] Nyt mennään.
     # We care about the media seconds in the ( ) and the text after the final ]
     primary = re.compile(
-        r'\[[^\]]+?\s+\(([0-9.]+)s\)\s*→\s*[^\]]+?\s+\(([0-9.]+)s\)\]\s*(.*)$',
+        r"\[[^\]]+?\s+\(([0-9.]+)s\)\s*→\s*[^\]]+?\s+\(([0-9.]+)s\)\]\s*(.*)$",
         re.MULTILINE,
     )
 
     # Fallback for TXT generated without fps (or manually created):
     #   [0.9s → 1.8s] Nyt mennään.
     fallback = re.compile(
-        r'\[([0-9.]+)s\s*→\s*([0-9.]+)s\]\s*(.*)$',
+        r"\[([0-9.]+)s\s*→\s*([0-9.]+)s\]\s*(.*)$",
         re.MULTILINE,
     )
 

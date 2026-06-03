@@ -14,12 +14,13 @@ class Segment(TypedDict, total=False):
     Time fields are normalized to float seconds at load time.
     Legacy data may contain string timestamps under 'start'/'end'.
     """
+
     source_in: float | str
     source_out: float | str
-    start: float | str          # legacy key for raw transcription (normalized to float on load)
-    end: float | str            # legacy key for raw transcription
+    start: float | str  # legacy key for raw transcription (normalized to float on load)
+    end: float | str  # legacy key for raw transcription
     text: str
-    reason: str                 # only present on AI-selected cuts
+    reason: str  # only present on AI-selected cuts
 
 
 class Video(BaseModel):
@@ -57,29 +58,36 @@ class Video(BaseModel):
     last_seen: datetime | None = None
     missing: bool = False
     tags: list[str] = Field(default_factory=list)
-    transcription_segments: list[Segment] | None = None   # Original language segments (normalized to float seconds)
-    original_language: str | None = None                  # Detected ISO code for the original transcription (e.g. "en", "fi")
-    translated_transcriptions: dict[str, list[Segment]] = Field(default_factory=dict)  # lang_code -> segments
+    transcription_segments: list[Segment] | None = (
+        None  # Original language segments (normalized to float seconds)
+    )
+    original_language: str | None = (
+        None  # Detected ISO code for the original transcription (e.g. "en", "fi")
+    )
+    translated_transcriptions: dict[str, list[Segment]] = Field(
+        default_factory=dict
+    )  # lang_code -> segments
 
     # Timecode information extracted at import time
-    tc_start: str | None = None   # e.g. "01:23:45:12"  (starting timecode of the clip)
-    tc_end: str | None = None     # e.g. "01:24:12:03"  (ending timecode of the clip)
+    tc_start: str | None = None  # e.g. "01:23:45:12"  (starting timecode of the clip)
+    tc_end: str | None = None  # e.g. "01:24:12:03"  (ending timecode of the clip)
 
-    @model_validator(mode='after')
-    def _normalize_transcription_timestamps(self) -> 'Video':
+    @model_validator(mode="after")
+    def _normalize_transcription_timestamps(self) -> Video:
         """Ensure all transcription segments have float timestamps.
 
         This handles legacy data that was stored with string 'HH:MM:SS.mmm' values
         under the 'start'/'end' keys.
         """
+
         def _to_float(ts: Any) -> float:
             if ts is None:
                 return 0.0
             if isinstance(ts, (int, float)):
                 return float(ts)
             if isinstance(ts, str):
-                t = ts.strip().replace(',', '.')
-                parts = t.split(':')
+                t = ts.strip().replace(",", ".")
+                parts = t.split(":")
                 try:
                     if len(parts) == 3:
                         h, m, s = parts
@@ -103,8 +111,12 @@ class Video(BaseModel):
                     continue
                 new_seg = dict(seg)
                 # Normalize possible keys
-                for old_key, new_key in [('start', 'start'), ('end', 'end'),
-                                         ('source_in', 'source_in'), ('source_out', 'source_out')]:
+                for old_key, new_key in [
+                    ("start", "start"),
+                    ("end", "end"),
+                    ("source_in", "source_in"),
+                    ("source_out", "source_out"),
+                ]:
                     if old_key in new_seg:
                         new_seg[old_key] = _to_float(new_seg[old_key])
                 # Track min for later shift-to-zero (only for obvious absolute/TOD timestamps >1h from transcriber)
@@ -128,6 +140,7 @@ class Video(BaseModel):
             # Always sanitize on load: fix any remaining inversions from old bad transcriptions,
             # drop junk, ensure sorted. This makes old garbage data usable without re-transcribing.
             from minicat.ai.transcriber import sanitize_transcription_segments
+
             normalized = sanitize_transcription_segments(normalized)
             return normalized
 
@@ -149,7 +162,7 @@ class Tag(BaseModel):
 
 class SearchFilters(BaseModel):
     text: str | None = None
-    client: list[str] | None = None         # New: filter by client name(s)
+    client: list[str] | None = None  # New: filter by client name(s)
     project: list[str] | None = None
     location: list[str] | None = None
     camera: list[str] | None = None
@@ -165,7 +178,7 @@ class CatalogSettings(BaseModel):
     storyboard_cols: int = 4
     storyboard_rows: int = 3
     storyboard_cell_width: int = 240
-    storyboard_cell_height: int = 135   # fixed cell size → all storyboards have identical dimensions
+    storyboard_cell_height: int = 135  # fixed cell size → all storyboards have identical dimensions
     jpeg_quality: int = 85
 
 
@@ -174,6 +187,7 @@ ProjectStatus = Literal["Pre-production", "Production", "Post-production", "Deli
 
 class Client(BaseModel):
     """Rich Client entity. One client can have multiple projects."""
+
     id: int | None = None
     name: str
     contact_person: str | None = None
@@ -181,8 +195,8 @@ class Client(BaseModel):
     phone: str | None = None
     address: str | None = None
     notes: str | None = None
-    color: str | None = None          # Hex color for visual tagging in sidebar
-    logo_path: str | None = None      # Local path to client logo image
+    color: str | None = None  # Hex color for visual tagging in sidebar
+    logo_path: str | None = None  # Local path to client logo image
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

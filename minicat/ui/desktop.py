@@ -63,9 +63,11 @@ def launch_desktop(
     def start_nicegui_server():
         """Run the NiceGUI web server in a background thread."""
         import os
+
         if os.environ.get("CAT_TAG_USE_NEW_WORKSPACE") == "1":
             # Previous experimental workspace (v1 attempt)
             from minicat.ui.workspace import setup_workspace_ui
+
             setup_workspace_ui(effective_catalog)
         else:
             setup_ui(effective_catalog)
@@ -80,11 +82,7 @@ def launch_desktop(
         )
 
     # Start NiceGUI server in background
-    server_thread = Thread(
-        target=start_nicegui_server,
-        daemon=True,
-        name="CAT+TAG-NiceGUI-Server"
-    )
+    server_thread = Thread(target=start_nicegui_server, daemon=True, name="CAT+TAG-NiceGUI-Server")
     server_thread.start()
 
     # Wait until the local server is ready to accept connections
@@ -100,7 +98,11 @@ def launch_desktop(
     time.sleep(1.2)
 
     # Create the actual native desktop window
-    window_title = title if os.environ.get("CAT_TAG_USE_NEW_WORKSPACE") != "1" else "CAT+TAG — Clean Workspace (v1)"
+    window_title = (
+        title
+        if os.environ.get("CAT_TAG_USE_NEW_WORKSPACE") != "1"
+        else "CAT+TAG — Clean Workspace (v1)"
+    )
     window = webview.create_window(
         title=window_title,
         url=url,

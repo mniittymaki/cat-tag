@@ -25,7 +25,6 @@ from typing import Any
 
 from minicat.core.settings import DEFAULT_GEMINI_MODEL, GEMINI_MODELS
 
-
 # =============================================================================
 # TONE & PURPOSE GUIDANCE (centralized, used by prompt builder and docs)
 # =============================================================================
@@ -232,18 +231,19 @@ def generate_journalist_cuts(
     *,
     min_duration_seconds: float = 0.0,
     purpose: str = "News Package",
-    tone: str = "newsroom",           # newsroom, flexible, documentary, corporate, commercial
+    tone: str = "newsroom",  # newsroom, flexible, documentary, corporate, commercial
     num_versions: int = 2,
-    clean_fillers: bool = False,      # When True, prefer and post-process for clean sentences without fillers
-    generate_narration: bool = False, # Back-compat: if True and narration_style is None, treat as "omniscient"
-    narration_style: str | None = None,  # Optional: None | "omniscient" | "subjective" | "explainer" (enables style-aware voiceover narration script)
-    material_language: str = "en",    # Language for any generated narration (must match source)
+    clean_fillers: bool = False,  # When True, prefer and post-process for clean sentences without fillers
+    generate_narration: bool = False,  # Back-compat: if True and narration_style is None, treat as "omniscient"
+    narration_style: str
+    | None = None,  # Optional: None | "omniscient" | "subjective" | "explainer" (enables style-aware voiceover narration script)
+    material_language: str = "en",  # Language for any generated narration (must match source)
     model_name: str = DEFAULT_GEMINI_MODEL,
     api_key: str | None = None,
     # New controls for the (single) narration_text produced for Journalist cuts
     narration_min_seconds: float = 0.0,  # target total spoken seconds for the whole narration_text
     narration_max_seconds: float = 0.0,
-    narration_min_bridges: int = 0,      # influences how many distinct "bridge sections" the narration script should have (0 = current sparing logic)
+    narration_min_bridges: int = 0,  # influences how many distinct "bridge sections" the narration script should have (0 = current sparing logic)
     narration_max_bridges: int = 0,
 ) -> list[dict[str, Any]]:
     """
@@ -315,8 +315,7 @@ def generate_journalist_cuts(
 
     # Detect multi-source input (segments carry source_* keys from the multi-clip journalist dialog)
     is_multi_source = any(
-        "source_label" in s or "source_filename" in s or "source_path" in s
-        for s in segments
+        "source_label" in s or "source_filename" in s or "source_path" in s for s in segments
     )
 
     if model_name not in GEMINI_MODELS:
@@ -328,13 +327,13 @@ def generate_journalist_cuts(
         from google.genai import types
     except ImportError as e:
         raise RuntimeError(
-            "AI Journalist Cutter requires 'google-genai'. "
-            "Please run: uv pip install google-genai"
+            "AI Journalist Cutter requires 'google-genai'. Please run: uv pip install google-genai"
         ) from e
 
     # Resolve API key
     if not api_key:
         from minicat.core.settings import get_gemini_api_key
+
         api_key = get_gemini_api_key()
 
     if not api_key or not api_key.strip():
@@ -376,10 +375,10 @@ def generate_journalist_cuts(
             generate_narration=bool(narration_style),
             narration_style=narration_style,
             material_language=material_language,
-            narration_min_seconds=narration_min_seconds,
-            narration_max_seconds=narration_max_seconds,
-            narration_min_bridges=narration_min_bridges,
-            narration_max_bridges=narration_max_bridges,
+            narration_min_seconds=narration_min_seconds,  # noqa: F821
+            narration_max_seconds=narration_max_seconds,  # noqa: F821
+            narration_min_bridges=narration_min_bridges,  # noqa: F821
+            narration_max_bridges=narration_max_bridges,  # noqa: F821
         )
 
         # Still run the existing reorder detection + retry as a final safety net
@@ -405,14 +404,14 @@ def generate_journalist_cuts(
             num_versions=num_versions,
             clean_fillers=clean_fillers,
             min_duration_seconds=min_duration_seconds,
-            has_audio=False,   # AI Journalist is transcript-only
+            has_audio=False,  # AI Journalist is transcript-only
             generate_narration=bool(narration_style),
             narration_style=narration_style,
             material_language=material_language,
-            narration_min_seconds=narration_min_seconds,
-            narration_max_seconds=narration_max_seconds,
-            narration_min_bridges=narration_min_bridges,
-            narration_max_bridges=narration_max_bridges,
+            narration_min_seconds=narration_min_seconds,  # noqa: F821
+            narration_max_seconds=narration_max_seconds,  # noqa: F821
+            narration_min_bridges=narration_min_bridges,  # noqa: F821
+            narration_max_bridges=narration_max_bridges,  # noqa: F821
         )
 
         multi_director_note = ""
@@ -499,25 +498,33 @@ Each suggestion must have a total runtime between {min_duration_seconds} and {ma
                 versions = _validate_and_normalize_versions(data, num_versions)
             except ValueError as ve:
                 if "AI failed to produce any valid cuts" in str(ve):
-                    print("[AI Journalist] Falling back to a simple greedy cut because the model did not produce usable output.")
-                    versions = _create_simple_fallback_cut(normalized_segments, max_duration_seconds, num_versions)
+                    print(
+                        "[AI Journalist] Falling back to a simple greedy cut because the model did not produce usable output."
+                    )
+                    versions = _create_simple_fallback_cut(
+                        normalized_segments, max_duration_seconds, num_versions
+                    )
                 else:
                     raise
 
         except Exception as e:
             print(f"[AI Journalist] Gemini call failed: {e}")
-            if 'raw_text' in locals():
+            if "raw_text" in locals():
                 print("[AI Journalist] Raw response was:")
-                print(raw_text[:3000] if 'raw_text' in locals() else "")
+                print(raw_text[:3000] if "raw_text" in locals() else "")
             raise RuntimeError(f"Failed to generate journalist cuts: {e}") from e
 
     # ------------------------------------------------------------------
     # FINAL SAFETY NET FOR REWRITE (works for both two-stage and any fallback)
     # ------------------------------------------------------------------
     if tone == "rewrite" and versions:
-        chrono_versions = [v for v in versions if _segments_are_chronological(v.get("selected_segments", []))]
+        chrono_versions = [
+            v for v in versions if _segments_are_chronological(v.get("selected_segments", []))
+        ]
         if chrono_versions:
-            print(f"[AI Journalist] REWRITE WARNING: {len(chrono_versions)}/{len(versions)} version(s) still chronological after scriptwriter pipeline. Final aggressive retry...")
+            print(
+                f"[AI Journalist] REWRITE WARNING: {len(chrono_versions)}/{len(versions)} version(s) still chronological after scriptwriter pipeline. Final aggressive retry..."
+            )
 
             bag_text = _segments_to_bag_of_moments(normalized_segments)
             retry_system = (
@@ -552,9 +559,15 @@ Return ONLY the JSON array in the exact same format.
                 retry_versions = _validate_and_normalize_versions(retry_data, num_versions)
 
                 if retry_versions:
-                    improved = [v for v in retry_versions if not _segments_are_chronological(v.get("selected_segments", []))]
+                    improved = [
+                        v
+                        for v in retry_versions
+                        if not _segments_are_chronological(v.get("selected_segments", []))
+                    ]
                     if improved:
-                        print(f"[AI Journalist] FINAL REWRITE RETRY SUCCESS: {len(improved)} version(s) now reordered.")
+                        print(
+                            f"[AI Journalist] FINAL REWRITE RETRY SUCCESS: {len(improved)} version(s) now reordered."
+                        )
                         versions = retry_versions
             except Exception as retry_ex:
                 print(f"[AI Journalist] Final rewrite retry failed (non-fatal): {retry_ex}")
@@ -595,10 +608,14 @@ Return ONLY the JSON array in the exact same format.
         v["total_duration"] = round(total, 1)
 
         if total > max_duration_seconds:
-            print(f"[AI Journalist] Note: Version {v.get('version_id')} ended up {total - max_duration_seconds:.1f}s over the requested limit (allowed tolerance: +{TOLERANCE}s).")
+            print(
+                f"[AI Journalist] Note: Version {v.get('version_id')} ended up {total - max_duration_seconds:.1f}s over the requested limit (allowed tolerance: +{TOLERANCE}s)."
+            )
 
         if min_duration_seconds > 0 and total < min_duration_seconds:
-            print(f"[AI Journalist] Warning: Version {v.get('version_id')} is only {total:.1f}s — below the requested minimum of {min_duration_seconds}s.")
+            print(
+                f"[AI Journalist] Warning: Version {v.get('version_id')} is only {total:.1f}s — below the requested minimum of {min_duration_seconds}s."
+            )
 
     # Attach diagnostic flag for UI (mainly useful for rewrite)
     for v in versions:
@@ -629,13 +646,14 @@ Return ONLY the JSON array in the exact same format.
 # EXPERIMENTAL: Audio-based AI Journalist Cutter
 # ---------------------------------------------------------------------------
 
+
 def generate_journalist_cuts_from_audio(
     audio_path: str | Path,
     max_duration_seconds: float,
     *,
     min_duration_seconds: float = 0.0,
     purpose: str = "News Package",
-    tone: str = "rewrite",           # Recommended: "rewrite" / Verbatim Scriptwriter
+    tone: str = "rewrite",  # Recommended: "rewrite" / Verbatim Scriptwriter
     num_versions: int = 2,
     model_name: str = DEFAULT_GEMINI_MODEL,
     api_key: str | None = None,
@@ -661,7 +679,9 @@ def generate_journalist_cuts_from_audio(
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
     if model_name not in GEMINI_MODELS:
-        print(f"[AI Journalist Audio] Warning: Model '{model_name}' not in supported list. Falling back.")
+        print(
+            f"[AI Journalist Audio] Warning: Model '{model_name}' not in supported list. Falling back."
+        )
         model_name = DEFAULT_GEMINI_MODEL
 
     try:
@@ -669,13 +689,13 @@ def generate_journalist_cuts_from_audio(
         from google.genai import types
     except ImportError as e:
         raise RuntimeError(
-            "AI Journalist (audio) requires 'google-genai'. "
-            "Please run: uv pip install google-genai"
+            "AI Journalist (audio) requires 'google-genai'. Please run: uv pip install google-genai"
         ) from e
 
     # Resolve API key
     if not api_key:
         from minicat.core.settings import get_gemini_api_key
+
         api_key = get_gemini_api_key()
 
     if not api_key or not api_key.strip():
@@ -810,7 +830,9 @@ Focus on what actually sounds powerful, emotional, surprising, or structurally u
             v["selected_segments"] = kept
             v["total_duration"] = round(total, 1)
 
-        print(f"[AI Journalist Audio] Successfully generated {len(versions)} version(s) from raw audio.")
+        print(
+            f"[AI Journalist Audio] Successfully generated {len(versions)} version(s) from raw audio."
+        )
 
         # Attach lang/style for VO if requested
         for v in versions:
@@ -823,9 +845,9 @@ Focus on what actually sounds powerful, emotional, surprising, or structurally u
 
     except Exception as e:
         print(f"[AI Journalist Audio] Gemini audio call failed: {e}")
-        if 'raw_text' in locals():
+        if "raw_text" in locals():
             print("[AI Journalist Audio] Raw response was:")
-            print(raw_text[:3000] if 'raw_text' in locals() else "")
+            print(raw_text[:3000] if "raw_text" in locals() else "")
         raise RuntimeError(f"Failed to generate journalist cuts from audio: {e}") from e
 
 
@@ -852,11 +874,13 @@ def _normalize_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if start is None or end is None:
             continue
 
-        normalized.append({
-            "start": float(start),
-            "end": float(end),
-            "text": text,
-        })
+        normalized.append(
+            {
+                "start": float(start),
+                "end": float(end),
+                "text": text,
+            }
+        )
 
     return normalized
 
@@ -948,25 +972,29 @@ def _create_simple_fallback_cut(
             dur = seg["end"] - seg["start"]
             if total + dur > max_duration_seconds * 0.95:
                 break
-            selected.append({
-                "source_in": round(seg["start"], 2),
-                "source_out": round(seg["end"], 2),
-                "text": seg["text"],
-                "reason": "Fallback: early segment from the interview",
-            })
+            selected.append(
+                {
+                    "source_in": round(seg["start"], 2),
+                    "source_out": round(seg["end"], 2),
+                    "text": seg["text"],
+                    "reason": "Fallback: early segment from the interview",
+                }
+            )
             total += dur
 
         if not selected:
             continue
 
         version_id = chr(65 + i)  # A, B, ...
-        versions.append({
-            "version_id": version_id,
-            "title": f"Simple Early Cut {version_id}",
-            "total_duration": round(total, 1),
-            "narrative_summary": "Automatic fallback cut (Gemini did not return usable structured output).",
-            "selected_segments": selected,
-        })
+        versions.append(
+            {
+                "version_id": version_id,
+                "title": f"Simple Early Cut {version_id}",
+                "total_duration": round(total, 1),
+                "narrative_summary": "Automatic fallback cut (Gemini did not return usable structured output).",
+                "selected_segments": selected,
+            }
+        )
 
     return versions
 
@@ -997,7 +1025,9 @@ def _build_journalist_system_prompt(
     for exact source_in/source_out and verbatim text.
     """
     tone_block = TONE_INSTRUCTIONS.get(tone, TONE_INSTRUCTIONS["newsroom"])
-    guidance = PURPOSE_GUIDANCE.get(purpose, "Create a coherent, editorially strong short version of the interview.")
+    guidance = PURPOSE_GUIDANCE.get(
+        purpose, "Create a coherent, editorially strong short version of the interview."
+    )
 
     narrative_order_instruction = (
         "SCRIPTWRITER MODE (REWRITE TONE): You are building a new story architecture. "
@@ -1007,8 +1037,8 @@ def _build_journalist_system_prompt(
         "Returning segments in roughly the same order as they were spoken is a failure of this task."
         if tone == "rewrite"
         else "The selected segments should generally be played in the order they appear in the original interview "
-             "to preserve natural speech flow and journalistic integrity. Only reorder if it significantly "
-             "improves the story without confusing the viewer."
+        "to preserve natural speech flow and journalistic integrity. Only reorder if it significantly "
+        "improves the story without confusing the viewer."
     )
 
     filler_instruction = ""
@@ -1035,36 +1065,45 @@ You have received BOTH the precise timed transcript AND the raw original audio (
 """
 
     narration_instruction = ""
-    style = (str(narration_style).strip().lower() if narration_style else None) if (generate_narration or narration_style) else None
+    style = (
+        (str(narration_style).strip().lower() if narration_style else None)
+        if (generate_narration or narration_style)
+        else None
+    )
     if style or generate_narration:
         style_instruction = ""
         if style == "omniscient":
-            style_instruction = '''
+            style_instruction = """
 NARRATION STYLE — OMNISCIENT (third-person journalistic):
 - Write the narration script in an objective, authoritative, third-person voice (e.g. "The team later discovered...", "What emerged was...").
 - The narrator acts as a trusted journalistic guide: providing context, bridging gaps, surfacing contradictions, without taking a personal side.
 - Tone like high-quality newsroom or prestige documentary voice-over.
-'''
+"""
         elif style == "subjective":
-            style_instruction = '''
+            style_instruction = """
 NARRATION STYLE — SUBJECTIVE (first-person reflective / essay-film):
 - Write in a first-person ("I/We") or deeply personal reflective voice, as if the filmmaker or participant is speaking directly.
 - Add emotional shading, subtext, doubt, or personal connection. Feels like internal monologue or essay-film voice.
-'''
+"""
         elif style == "explainer":
-            style_instruction = '''
+            style_instruction = """
 NARRATION STYLE — EXPLAINER (high-energy short-form / social media hook):
 - Write in a direct, energetic, snappy, YouTube/TikTok explainer or hype voice.
 - Short punchy sentences, questions, clear setup→payoff. Optimized for immediate attention and engagement.
-'''
+"""
         else:
-            style_instruction = '''
+            style_instruction = """
 NARRATION STYLE — (default journalistic):
 - Write an elegant, sparing, purposeful connecting narration script in the source language.
 - Short bridges that add emotion, context, transition or thematic glue.
-'''
+"""
         budget_extra = ""
-        if narration_min_seconds or narration_max_seconds or narration_min_bridges or narration_max_bridges:
+        if (
+            narration_min_seconds
+            or narration_max_seconds
+            or narration_min_bridges
+            or narration_max_bridges
+        ):
             budget_extra = "\nNARRATION LENGTH & STRUCTURE (user settings):\n"
             if narration_min_seconds or narration_max_seconds:
                 mins = narration_min_seconds or 5
@@ -1150,15 +1189,50 @@ Example output format:
 # ---------------------------------------------------------------------------
 
 FILLERS_EN = {
-    "um", "uh", "er", "ah", "hmm", "mm", "like", "you know", "i mean", "sort of",
-    "kinda", "kind of", "basically", "actually", "so", "well", "right", "okay",
-    "you see", "i guess", "i suppose", "you know what i mean",
+    "um",
+    "uh",
+    "er",
+    "ah",
+    "hmm",
+    "mm",
+    "like",
+    "you know",
+    "i mean",
+    "sort of",
+    "kinda",
+    "kind of",
+    "basically",
+    "actually",
+    "so",
+    "well",
+    "right",
+    "okay",
+    "you see",
+    "i guess",
+    "i suppose",
+    "you know what i mean",
 }
 
 FILLERS_FI = {
-    "öö", "aa", "äh", "hmm", "mm", "niinku", "tota", "siis", "no", "joo",
-    "emmätiiä", "silleen", "niin", "kyl", "kyllä", "oikeestaan", "periaattees",
+    "öö",
+    "aa",
+    "äh",
+    "hmm",
+    "mm",
+    "niinku",
+    "tota",
+    "siis",
+    "no",
+    "joo",
+    "emmätiiä",
+    "silleen",
+    "niin",
+    "kyl",
+    "kyllä",
+    "oikeestaan",
+    "periaattees",
 }
+
 
 def _remove_filler_words(text: str, language_hint: str | None = None) -> str:
     """
@@ -1188,10 +1262,29 @@ def _remove_filler_words(text: str, language_hint: str | None = None) -> str:
     # Discourse markers that are often safe to remove in spoken Finnish/English
     # when they don't carry essential meaning.
     discourse_markers = {
-        "like", "you know", "i mean", "sort of", "kinda", "kind of",
-        "basically", "actually", "so", "well", "right", "okay",
-        "you see", "i guess", "i suppose",
-        "niinku", "tota", "siis", "no", "joo", "silleen", "oikeestaan", "periaattees",
+        "like",
+        "you know",
+        "i mean",
+        "sort of",
+        "kinda",
+        "kind of",
+        "basically",
+        "actually",
+        "so",
+        "well",
+        "right",
+        "okay",
+        "you see",
+        "i guess",
+        "i suppose",
+        "niinku",
+        "tota",
+        "siis",
+        "no",
+        "joo",
+        "silleen",
+        "oikeestaan",
+        "periaattees",
     }
 
     fillers_to_consider = pure_noise | discourse_markers
@@ -1206,28 +1299,28 @@ def _remove_filler_words(text: str, language_hint: str | None = None) -> str:
 
     # === Pass 1: Remove pure noise (very safe) ===
     for filler in sorted(pure_noise, key=len, reverse=True):
-        pattern = r'\b' + re.escape(filler) + r'\b'
+        pattern = r"\b" + re.escape(filler) + r"\b"
         cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
 
     # === Pass 2: Remove discourse markers more carefully ===
     # We use broader patterns but with a strong post-clean quality gate.
     for filler in sorted(discourse_markers, key=len, reverse=True):
         patterns = [
-            r',\s*' + re.escape(filler) + r'\s*,',
-            r',\s*' + re.escape(filler) + r'\s+',
-            r'\s+' + re.escape(filler) + r'\s*,',
-            r'\s+' + re.escape(filler) + r'\s+',
-            r'^\s*' + re.escape(filler) + r'\s+',      # at the very start
-            r'\s+' + re.escape(filler) + r'\s*$',      # at the very end
+            r",\s*" + re.escape(filler) + r"\s*,",
+            r",\s*" + re.escape(filler) + r"\s+",
+            r"\s+" + re.escape(filler) + r"\s*,",
+            r"\s+" + re.escape(filler) + r"\s+",
+            r"^\s*" + re.escape(filler) + r"\s+",  # at the very start
+            r"\s+" + re.escape(filler) + r"\s*$",  # at the very end
         ]
         for p in patterns:
             cleaned = re.sub(p, " ", cleaned, flags=re.IGNORECASE)
 
     # Final cleanup
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    cleaned = re.sub(r'\s*,\s*,', ',', cleaned)
-    cleaned = re.sub(r'^\s*[,.\-–—]\s*', '', cleaned)
-    cleaned = re.sub(r'\s*[,.\-–—]\s*$', '', cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = re.sub(r"\s*,\s*,", ",", cleaned)
+    cleaned = re.sub(r"^\s*[,.\-–—]\s*", "", cleaned)
+    cleaned = re.sub(r"\s*[,.\-–—]\s*$", "", cleaned)
 
     # === Quality / Meaning preservation checks ===
     original_words = [w for w in original.split() if w]
@@ -1249,14 +1342,13 @@ def _remove_filler_words(text: str, language_hint: str | None = None) -> str:
         return original
 
     # Reject obviously broken results
-    if cleaned.startswith(',') or cleaned.startswith('.'):
+    if cleaned.startswith(",") or cleaned.startswith("."):
         return original
 
     # New stronger check: preserve core meaning
     # Extract "content words" (longer words that are not common fillers)
     def _content_words(s):
-        return [w for w in re.findall(r'\b\w{4,}\b', s.lower()) 
-                if w not in fillers_to_consider]
+        return [w for w in re.findall(r"\b\w{4,}\b", s.lower()) if w not in fillers_to_consider]
 
     original_content = set(_content_words(original))
     cleaned_content = set(_content_words(cleaned))
@@ -1299,12 +1391,8 @@ def _validate_and_normalize_versions(data: Any, expected_count: int) -> list[dic
             try:
                 # Support both the new recommended keys and legacy keys
                 # (in case the model doesn't follow the prompt perfectly)
-                start = float(
-                    seg.get("source_in") or seg.get("start", 0)
-                )
-                end = float(
-                    seg.get("source_out") or seg.get("end", 0)
-                )
+                start = float(seg.get("source_in") or seg.get("start", 0))
+                end = float(seg.get("source_out") or seg.get("end", 0))
                 text = str(seg.get("text", "")).strip()
                 reason = str(seg.get("reason", "")).strip()
 
@@ -1340,7 +1428,7 @@ def _validate_and_normalize_versions(data: Any, expected_count: int) -> list[dic
                     clean_seg["moment_id"] = str(seg["moment_id"]).strip().upper()
 
                 clean_segments.append(clean_seg)
-                total += (end - start)
+                total += end - start
             except Exception:
                 continue
 
@@ -1383,6 +1471,7 @@ def _validate_and_normalize_versions(data: Any, expected_count: int) -> list[dic
 # Two-stage Verbatim Scriptwriter helpers (used only for tone == "rewrite")
 # ---------------------------------------------------------------------------
 
+
 def _generate_rewrite_versions_two_stage(
     *,
     client,
@@ -1411,7 +1500,7 @@ def _generate_rewrite_versions_two_stage(
     from google.genai import types
 
     # Transcript-only: no media is attached
-    stage1_media_part = None
+    _stage1_media_part = None  # noqa: F841 (kept for future media support)
 
     # --- Stage 1: Mine powerful raw material (as scriptwriter, not editor) ---
     print("[AI Journalist] Stage 1: Mining powerful verbatim moments for story construction...")
@@ -1457,21 +1546,26 @@ Extract the strongest raw material for building a completely new short story. Fo
                 raw1 = raw1[4:].strip()
         candidates = json.loads(raw1)
     except Exception as e:
-        print(f"[AI Journalist] Stage 1 mining failed ({e}). Falling back to normal single-pass rewrite.")
+        print(
+            f"[AI Journalist] Stage 1 mining failed ({e}). Falling back to normal single-pass rewrite."
+        )
         # Fallback to old behavior (transcript-only)
         return _single_pass_rewrite_fallback(
-            client=client, model_name=model_name,
+            client=client,
+            model_name=model_name,
             normalized_segments=normalized_segments,
             max_duration_seconds=max_duration_seconds,
             min_duration_seconds=min_duration_seconds,
-            purpose=purpose, num_versions=num_versions, clean_fillers=clean_fillers,
+            purpose=purpose,
+            num_versions=num_versions,
+            clean_fillers=clean_fillers,
             generate_narration=bool(narration_style),
             narration_style=narration_style,
             material_language=material_language,
-            narration_min_seconds=narration_min_seconds,
-            narration_max_seconds=narration_max_seconds,
-            narration_min_bridges=narration_min_bridges,
-            narration_max_bridges=narration_max_bridges,
+            narration_min_seconds=narration_min_seconds,  # noqa: F821
+            narration_max_seconds=narration_max_seconds,  # noqa: F821
+            narration_min_bridges=narration_min_bridges,  # noqa: F821
+            narration_max_bridges=narration_max_bridges,  # noqa: F821
         )
 
     # Keep only valid candidates with real timestamps
@@ -1483,42 +1577,49 @@ Extract the strongest raw material for building a completely new short story. Fo
             txt = (c.get("text") or "").strip()
             pot = (c.get("dramatic_potential") or "").strip()
             if e > s + 0.3 and txt:
-                valid_candidates.append({
-                    "source_in": round(s, 2),
-                    "source_out": round(e, 2),
-                    "text": txt,
-                    "dramatic_potential": pot or "Strong moment"
-                })
+                valid_candidates.append(
+                    {
+                        "source_in": round(s, 2),
+                        "source_out": round(e, 2),
+                        "text": txt,
+                        "dramatic_potential": pot or "Strong moment",
+                    }
+                )
         except Exception:
             continue
 
     if len(valid_candidates) < 4:
         print("[AI Journalist] Stage 1 returned too few good moments. Using fallback.")
         return _single_pass_rewrite_fallback(
-            client=client, model_name=model_name,
+            client=client,
+            model_name=model_name,
             normalized_segments=normalized_segments,
             max_duration_seconds=max_duration_seconds,
             min_duration_seconds=min_duration_seconds,
-            purpose=purpose, num_versions=num_versions, clean_fillers=clean_fillers,
+            purpose=purpose,
+            num_versions=num_versions,
+            clean_fillers=clean_fillers,
             generate_narration=bool(narration_style),
             narration_style=narration_style,
             material_language=material_language,
-            narration_min_seconds=narration_min_seconds,
-            narration_max_seconds=narration_max_seconds,
-            narration_min_bridges=narration_min_bridges,
-            narration_max_bridges=narration_max_bridges,
+            narration_min_seconds=narration_min_seconds,  # noqa: F821
+            narration_max_seconds=narration_max_seconds,  # noqa: F821
+            narration_min_bridges=narration_min_bridges,  # noqa: F821
+            narration_max_bridges=narration_max_bridges,  # noqa: F821
             # (source_media_path removed - journalist is transcript-only)
         )
 
     # Shuffle for Stage 2 so the architect is not biased by mining order
     random.shuffle(valid_candidates)
     candidate_text = "\n".join(
-        f"[M{i+1}] ({c['source_in']}s–{c['source_out']}s) {c['text']}\n   → Potential: {c['dramatic_potential']}"
+        f"[M{i + 1}] ({c['source_in']}s–{c['source_out']}s) {c['text']}\n   → Potential: {c['dramatic_potential']}"
         for i, c in enumerate(valid_candidates[:18])  # cap context
     )
 
     # --- Stage 2: Build new story architecture as scriptwriter ---
-    print(f"[AI Journalist] Stage 2: Building new story architecture from {len(valid_candidates)} mined moments...")
+    print(
+        f"[AI Journalist] Stage 2: Building new story architecture from {len(valid_candidates)} mined moments..."
+    )
 
     stage2_system = f"""
 You are a scriptwriter and narrative architect.
@@ -1584,7 +1685,7 @@ Now build {num_versions} genuinely new story versions from this material only.
         # === Robust post-repair for two-stage rewrite ===
         # The LLM in Stage 2 is asked to build selected_segments using the source_in/out it was shown
         # next to each [Mxx] moment, but it frequently hallucinates, rounds wrongly, or invents tiny
-        # windows (especially at temperature 0.85). 
+        # windows (especially at temperature 0.85).
         # 1. If it included "moment_id": "M3", use that to attach the exact candidate timing 100% reliably.
         # 2. Otherwise fall back to text match on the emitted "text".
         # This guarantees the exported AI_Cut_*.txt SELECTED and the XML clipitem <in>/<out> use the
@@ -1596,9 +1697,9 @@ Now build {num_versions} genuinely new story versions from this material only.
                 norm = (c.get("text") or "").strip().lower()[:120]
                 if norm:
                     cand_by_norm.setdefault(norm, c)
-                # Map "M1", "M2", ... (1-based as shown to LLM) 
-                cand_by_moment[f"M{idx+1}"] = c
-                cand_by_moment[f"m{idx+1}"] = c
+                # Map "M1", "M2", ... (1-based as shown to LLM)
+                cand_by_moment[f"M{idx + 1}"] = c
+                cand_by_moment[f"m{idx + 1}"] = c
 
             for ver in versions:
                 for seg in ver.get("selected_segments", []):
@@ -1636,18 +1737,21 @@ Now build {num_versions} genuinely new story versions from this material only.
     except Exception as e:
         print(f"[AI Journalist] Stage 2 story architecture failed ({e}). Falling back.")
         return _single_pass_rewrite_fallback(
-            client=client, model_name=model_name,
+            client=client,
+            model_name=model_name,
             normalized_segments=normalized_segments,
             max_duration_seconds=max_duration_seconds,
             min_duration_seconds=min_duration_seconds,
-            purpose=purpose, num_versions=num_versions, clean_fillers=clean_fillers,
+            purpose=purpose,
+            num_versions=num_versions,
+            clean_fillers=clean_fillers,
             generate_narration=bool(narration_style),
             narration_style=narration_style,
             material_language=material_language,
-            narration_min_seconds=narration_min_seconds,
-            narration_max_seconds=narration_max_seconds,
-            narration_min_bridges=narration_min_bridges,
-            narration_max_bridges=narration_max_bridges,
+            narration_min_seconds=narration_min_seconds,  # noqa: F821
+            narration_max_seconds=narration_max_seconds,  # noqa: F821
+            narration_min_bridges=narration_min_bridges,  # noqa: F821
+            narration_max_bridges=narration_max_bridges,  # noqa: F821
             # (source_media_path removed - journalist is transcript-only)
         )
 

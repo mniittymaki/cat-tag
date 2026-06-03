@@ -8,14 +8,16 @@ clean, low-resolution compositing.
 from __future__ import annotations
 
 import difflib
+import json
 import re
 import shutil
 import subprocess
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from minicat.core.models import Video
@@ -29,14 +31,19 @@ except ImportError:
 import xxhash
 from PIL import Image
 
-from minicat.core.config import get_audio_dir, get_previews_dir, get_transcriptions_dir, get_subtitles_dir
+from minicat.core.config import (
+    get_audio_dir,
+    get_previews_dir,
+    get_subtitles_dir,
+    get_transcriptions_dir,
+)
 from minicat.core.env import get_ffmpeg_install_hint
 
 
 def _run_ffmpeg_with_progress(
     cmd: list[str],
     total_duration: float,
-    progress_callback: Optional[Callable[[float, float], None]] = None,
+    progress_callback: Callable[[float, float], None] | None = None,
     *,
     timeout: int = 3600,
 ) -> None:
@@ -150,10 +157,7 @@ def get_ffmpeg_version() -> str:
     try:
         ffmpeg = find_ffmpeg()
         result = subprocess.run(
-            [str(ffmpeg), "-version"],
-            capture_output=True,
-            text=True,
-            timeout=5
+            [str(ffmpeg), "-version"], capture_output=True, text=True, timeout=5
         )
         first_line = result.stdout.splitlines()[0] if result.stdout else ""
         return first_line.strip()
@@ -164,6 +168,7 @@ def get_ffmpeg_version() -> str:
 # ---------------------------------------------------------------------------
 # Metadata extraction
 # ---------------------------------------------------------------------------
+
 
 def _parse_ffprobe_output(raw: dict[str, Any]) -> dict[str, Any]:
     """Turn ffprobe -show_format -show_streams JSON into something useful."""
@@ -234,10 +239,13 @@ def has_opus_audio(path: str | Path) -> bool:
         ffprobe = find_ffprobe()
         cmd = [
             str(ffprobe),
-            "-v", "error",
-            "-print_format", "json",
+            "-v",
+            "error",
+            "-print_format",
+            "json",
             "-show_streams",
-            "-select_streams", "a",
+            "-select_streams",
+            "a",
             str(video_path),
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
@@ -245,6 +253,7 @@ def has_opus_audio(path: str | Path) -> bool:
             return False
 
         import json
+
         data = json.loads(result.stdout or "{}")
         for stream in data.get("streams", []):
             if stream.get("codec_name", "").lower() == "opus":
@@ -289,11 +298,16 @@ def create_premiere_friendly_version(
     cmd = [
         str(ffmpeg),
         "-y",
-        "-i", str(src),
-        "-c:v", "copy",                    # copy video without re-encoding
-        "-c:a", audio_codec,
-        "-b:a", audio_bitrate,
-        "-movflags", "+faststart",
+        "-i",
+        str(src),
+        "-c:v",
+        "copy",  # copy video without re-encoding
+        "-c:a",
+        audio_codec,
+        "-b:a",
+        audio_bitrate,
+        "-movflags",
+        "+faststart",
         str(out),
     ]
 
@@ -319,11 +333,14 @@ def extract_metadata(path: str | Path) -> dict[str, Any]:
 
     cmd = [
         str(ffprobe),
-        "-v", "error",
-        "-print_format", "json",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
         "-show_format",
         "-show_streams",
-        "-show_entries", "stream=codec_type,width,height,r_frame_rate,codec_name",
+        "-show_entries",
+        "stream=codec_type,width,height,r_frame_rate,codec_name",
         str(video_path),
     ]
 
@@ -332,6 +349,7 @@ def extract_metadata(path: str | Path) -> dict[str, Any]:
         raise RuntimeError(f"ffprobe failed on {video_path}: {result.stderr}")
 
     import json
+
     raw = json.loads(result.stdout or "{}")
     meta = _parse_ffprobe_output(raw)
     meta["path"] = str(video_path)
@@ -347,7 +365,7 @@ def extract_metadata(path: str | Path) -> dict[str, Any]:
             fps_for_tc = detected_fps or meta.get("fps") or 25.0
             if duration:
                 meta["tc_end"] = _add_duration_to_timecode(tc_start, duration, fps_for_tc)
-    except Exception as tc_err:
+    except Exception:
         # Non-fatal — many files won't have embedded timecode
         pass
 
@@ -380,7 +398,9 @@ def confirm_video_framerate(video_path: str | Path) -> float:
         if fps and float(fps) > 0:
             fps = float(fps)
             if fps > 120 or fps < 1:
-                print(f"[Import/Backfill] WARNING: unrealistic fps {fps} probed from {video_path.name}, using 25.0 instead (file may have bad metadata)")
+                print(
+                    f"[Import/Backfill] WARNING: unrealistic fps {fps} probed from {video_path.name}, using 25.0 instead (file may have bad metadata)"
+                )
                 fps = 25.0
             else:
                 print(f"[Import/Backfill] Live probe of {video_path.name} reports {fps} fps")
@@ -391,12 +411,15 @@ def confirm_video_framerate(video_path: str | Path) -> float:
     # Fallback using the existing timebase prober (handles some NTSC rounding but we take as float)
     try:
         from minicat.ai.xmeml_exporter import get_video_timebase
+
         tb = get_video_timebase(video_path)
         if tb and tb > 0:
             # get_video_timebase may have rounded 23.976->24 etc.; for transcription we prefer
             # the raw rate, but this is better than nothing. Do a direct float probe if possible.
             if tb > 120 or tb < 1:
-                print(f"[Import/Backfill] WARNING: unrealistic timebase {tb} from fallback for {video_path.name}, using 25.0")
+                print(
+                    f"[Import/Backfill] WARNING: unrealistic timebase {tb} from fallback for {video_path.name}, using 25.0"
+                )
                 tb = 25
             else:
                 print(f"[Import/Backfill] Fallback for {video_path.name}: {tb}")
@@ -413,6 +436,7 @@ def confirm_video_framerate(video_path: str | Path) -> float:
 # Many professional cameras write rich metadata XML files next to the clips.
 # ---------------------------------------------------------------------------
 
+
 def find_camera_metadata_sidecar(video_path: Path) -> Path | None:
     """
     Find camera-generated metadata sidecars next to the video.
@@ -423,12 +447,18 @@ def find_camera_metadata_sidecar(video_path: Path) -> Path | None:
 
     # Order matters: more specific camera formats first
     extensions = [
-        ".xml", ".XML",
-        ".xmp", ".XMP",
-        ".rmd", ".RMD",           # RED
-        ".sidecar", ".SIDE CAR",  # Blackmagic BRAW
-        ".json", ".JSON",
-        ".nksc", ".NKSC",         # Nikon sidecar (XMP-based, used by NX Studio)
+        ".xml",
+        ".XML",
+        ".xmp",
+        ".XMP",
+        ".rmd",
+        ".RMD",  # RED
+        ".sidecar",
+        ".SIDE CAR",  # Blackmagic BRAW
+        ".json",
+        ".JSON",
+        ".nksc",
+        ".NKSC",  # Nikon sidecar (XMP-based, used by NX Studio)
     ]
 
     for ext in extensions:
@@ -438,12 +468,18 @@ def find_camera_metadata_sidecar(video_path: Path) -> Path | None:
 
     # Glob patterns (handles C0001M01.XML, clip_001_metadata.sidecar, etc.)
     glob_patterns = [
-        f"{stem}*.xml", f"{stem}*.XML",
-        f"{stem}*.xmp", f"{stem}*.XMP",
-        f"{stem}*.rmd", f"{stem}*.RMD",
-        f"{stem}*.sidecar", f"{stem}*.SIDE CAR",
-        f"{stem}*.json", f"{stem}*.JSON",
-        f"{stem}*.nksc", f"{stem}*.NKSC",
+        f"{stem}*.xml",
+        f"{stem}*.XML",
+        f"{stem}*.xmp",
+        f"{stem}*.XMP",
+        f"{stem}*.rmd",
+        f"{stem}*.RMD",
+        f"{stem}*.sidecar",
+        f"{stem}*.SIDE CAR",
+        f"{stem}*.json",
+        f"{stem}*.JSON",
+        f"{stem}*.nksc",
+        f"{stem}*.NKSC",
     ]
     for pattern in glob_patterns:
         matches = sorted(parent.glob(pattern))
@@ -477,6 +513,7 @@ def extract_metadata_with_exiftool(video_path: Path) -> dict[str, Any]:
             return result
 
         import json
+
         data = json.loads(proc.stdout)
         if not data:
             return result
@@ -496,6 +533,7 @@ def extract_metadata_with_exiftool(video_path: Path) -> dict[str, Any]:
                 return int(float(str(v)))
             except Exception:
                 return None
+
         if meta.get("EXIF:ISO") or meta.get("QuickTime:ISO"):
             result["iso"] = _ci(meta.get("EXIF:ISO") or meta.get("QuickTime:ISO"))
 
@@ -510,12 +548,20 @@ def extract_metadata_with_exiftool(video_path: Path) -> dict[str, Any]:
             result["focal_length"] = round(float(str(fl).split()[0]))
 
         if meta.get("EXIF:WhiteBalance") or meta.get("QuickTime:WhiteBalance"):
-            result["white_balance"] = str(meta.get("EXIF:WhiteBalance") or meta.get("QuickTime:WhiteBalance"))
+            result["white_balance"] = str(
+                meta.get("EXIF:WhiteBalance") or meta.get("QuickTime:WhiteBalance")
+            )
 
         # Fuji Film Simulation (very valuable for Fuji shooters)
-        fuji_film = meta.get("MakerNotes:FilmMode") or meta.get("FujiFilm:FilmMode") or meta.get("FujiFilm:FilmSimulation")
+        fuji_film = (
+            meta.get("MakerNotes:FilmMode")
+            or meta.get("FujiFilm:FilmMode")
+            or meta.get("FujiFilm:FilmSimulation")
+        )
         if fuji_film:
-            result["gamma"] = str(fuji_film)   # Users often want to see "Eterna", "Classic Negative", etc.
+            result["gamma"] = str(
+                fuji_film
+            )  # Users often want to see "Eterna", "Classic Negative", etc.
             if not result.get("camera"):
                 result["camera"] = "Fujifilm"
 
@@ -543,7 +589,9 @@ def is_exiftool_available() -> bool:
     return False
 
 
-def extract_camera_xml_metadata(video_path: str | Path, *, enrich_with_exiftool: bool = False) -> dict[str, Any]:
+def extract_camera_xml_metadata(
+    video_path: str | Path, *, enrich_with_exiftool: bool = False
+) -> dict[str, Any]:
     """
     Best-effort parser for camera sidecar files (XML, XMP, RMD, JSON .sidecar).
 
@@ -584,6 +632,7 @@ def extract_camera_xml_metadata(video_path: str | Path, *, enrich_with_exiftool:
     if sidecar_path.suffix.lower() in (".sidecar", ".json"):
         try:
             import json
+
             data = json.loads(sidecar_path.read_text())
             # Blackmagic sidecars are usually a dict or list with one dict
             if isinstance(data, list) and data:
@@ -598,7 +647,9 @@ def extract_camera_xml_metadata(video_path: str | Path, *, enrich_with_exiftool:
                 if meta.get("ISO") or meta.get("iso"):
                     result["iso"] = _safe_int(meta.get("ISO") or meta.get("iso"))
                 if meta.get("whiteBalance") or meta.get("white_balance"):
-                    result["white_balance"] = str(meta.get("whiteBalance") or meta.get("white_balance"))
+                    result["white_balance"] = str(
+                        meta.get("whiteBalance") or meta.get("white_balance")
+                    )
                 if meta.get("gamma") or meta.get("colorScience"):
                     result["gamma"] = str(meta.get("gamma") or meta.get("colorScience"))
                 if meta.get("colorSpace"):
@@ -706,7 +757,8 @@ def extract_camera_xml_metadata(video_path: str | Path, *, enrich_with_exiftool:
 
                 if tag in ("masteriso", "iso"):
                     val = clean_int(text or attrs.get("value", ""))
-                    if val: result["iso"] = val
+                    if val:
+                        result["iso"] = val
                 if tag in ("kelvin", "whitebalance"):
                     result["white_balance"] = text or attrs.get("value", "")
                 if tag in ("colorspace", "gamma"):
@@ -734,7 +786,8 @@ def extract_camera_xml_metadata(video_path: str | Path, *, enrich_with_exiftool:
                     add_candidate(lens_candidates, val)
                 if "exposureindex" in tag or "asa" in tag:
                     val_i = clean_int(val)
-                    if val_i: result["iso"] = val_i
+                    if val_i:
+                        result["iso"] = val_i
                 if "whitebalance" in tag and "kelvin" in tag.lower():
                     result["white_balance"] = val
                 if "shutterangle" in tag:
@@ -757,12 +810,14 @@ def extract_camera_xml_metadata(video_path: str | Path, *, enrich_with_exiftool:
                     add_candidate(lens_candidates, text)
                 if tag in ("iso", "gain"):
                     val = clean_int(text)
-                    if val: result["iso"] = val
+                    if val:
+                        result["iso"] = val
                 if "shutter" in tag:
                     result["shutter_speed"] = text
                 if "fnumber" in tag or "iris" in tag:
                     val = clean_float(text)
-                    if val: result["f_number"] = round(val, 1)
+                    if val:
+                        result["f_number"] = round(val, 1)
                 if "gamma" in tag or "log" in text.lower():
                     result["gamma"] = text
 
@@ -803,15 +858,18 @@ def extract_camera_xml_metadata(video_path: str | Path, *, enrich_with_exiftool:
                 av = item_value
                 if any(pt in item_name for pt in technical_map["iso"]):
                     val = clean_int(av)
-                    if val: result["iso"] = val
+                    if val:
+                        result["iso"] = val
                 if any(pt in item_name for pt in technical_map["f_number"]):
                     val = clean_float(av)
-                    if val: result["f_number"] = round(val, 1)
+                    if val:
+                        result["f_number"] = round(val, 1)
                 if any(pt in item_name for pt in technical_map["shutter_speed"]):
                     result["shutter_speed"] = av
                 if any(pt in item_name for pt in technical_map["focal_length"]):
                     val = clean_float(av)
-                    if val: result["focal_length"] = round(val)
+                    if val:
+                        result["focal_length"] = round(val)
                 if any(pt in item_name for pt in technical_map["white_balance"]):
                     result["white_balance"] = av
 
@@ -820,14 +878,36 @@ def extract_camera_xml_metadata(video_path: str | Path, *, enrich_with_exiftool:
                 if not av:
                     continue
                 is_device_context = any(k in tag for k in ("device", "camera", "nonrealtimemeta"))
-                if is_device_context and any(k in an for k in ("modelname", "model", "devicename", "manufacturer", "make", "cameramodel")):
+                if is_device_context and any(
+                    k in an
+                    for k in (
+                        "modelname",
+                        "model",
+                        "devicename",
+                        "manufacturer",
+                        "make",
+                        "cameramodel",
+                    )
+                ):
                     add_candidate(camera_candidates, av)
 
                 is_lens_context = any(k in tag for k in ("lens", "lensmodel"))
-                if is_lens_context and any(k in an for k in ("modelname", "model", "lensmodelname", "lensmodel", "optic")):
+                if is_lens_context and any(
+                    k in an for k in ("modelname", "model", "lensmodelname", "lensmodel", "optic")
+                ):
                     add_candidate(lens_candidates, av)
 
-                if any(k in an for k in ("codec", "videocodec", "format", "recordingformat", "codecname", "formatname")):
+                if any(
+                    k in an
+                    for k in (
+                        "codec",
+                        "videocodec",
+                        "format",
+                        "recordingformat",
+                        "codecname",
+                        "formatname",
+                    )
+                ):
                     add_candidate(codec_candidates, av)
 
                 # Technical fallbacks
@@ -835,15 +915,18 @@ def extract_camera_xml_metadata(video_path: str | Path, *, enrich_with_exiftool:
                     if any(pt in an for pt in aliases):
                         if field == "iso":
                             val = clean_int(av)
-                            if val: result["iso"] = val
+                            if val:
+                                result["iso"] = val
                         elif field == "f_number":
                             val = clean_float(av)
-                            if val: result["f_number"] = round(val, 1)
+                            if val:
+                                result["f_number"] = round(val, 1)
                         elif field == "shutter_speed":
                             result["shutter_speed"] = av
                         elif field == "focal_length":
                             val = clean_float(av)
-                            if val: result["focal_length"] = round(val)
+                            if val:
+                                result["focal_length"] = round(val)
                         elif field == "white_balance":
                             result["white_balance"] = av
                         elif field == "gamma":
@@ -853,28 +936,47 @@ def extract_camera_xml_metadata(video_path: str | Path, *, enrich_with_exiftool:
                 continue
 
             # Generic collection (works across brands)
-            if any(k in tag for k in ("model", "device", "cameramodel", "manufacturer", "make", "modelname")):
+            if any(
+                k in tag
+                for k in ("model", "device", "cameramodel", "manufacturer", "make", "modelname")
+            ):
                 add_candidate(camera_candidates, text)
             if any(k in tag for k in ("lens", "optic", "glass", "lensmodel", "lensmodelname")):
                 add_candidate(lens_candidates, text)
-            if any(k in tag for k in ("codec", "videocodec", "format", "recordingformat", "codecname")):
+            if any(
+                k in tag for k in ("codec", "videocodec", "format", "recordingformat", "codecname")
+            ):
                 add_candidate(codec_candidates, text)
-            if any(k in tag for k in ("datetime", "date", "time", "startdate", "creation", "recdate", "creationdate")):
+            if any(
+                k in tag
+                for k in (
+                    "datetime",
+                    "date",
+                    "time",
+                    "startdate",
+                    "creation",
+                    "recdate",
+                    "creationdate",
+                )
+            ):
                 date_candidates.append(text)
 
             for field, aliases in technical_map.items():
                 if any(pt in tag for pt in aliases):
                     if field == "iso":
                         val = clean_int(text)
-                        if val: result["iso"] = val
+                        if val:
+                            result["iso"] = val
                     elif field == "f_number":
                         val = clean_float(text)
-                        if val: result["f_number"] = round(val, 1)
+                        if val:
+                            result["f_number"] = round(val, 1)
                     elif field == "shutter_speed":
                         result["shutter_speed"] = text
                     elif field == "focal_length":
                         val = clean_float(text)
-                        if val: result["focal_length"] = round(val)
+                        if val:
+                            result["focal_length"] = round(val)
                     elif field == "white_balance":
                         result["white_balance"] = text
                     elif field == "gamma":
@@ -883,7 +985,10 @@ def extract_camera_xml_metadata(video_path: str | Path, *, enrich_with_exiftool:
         # Final best-value selection
         if camera_candidates:
             cam = max(set(camera_candidates), key=len)
-            if any(x in cam.upper() for x in ("ILCE", "ILME", "PXW", "FDR", "BURANO")) and "SONY" not in cam.upper():
+            if (
+                any(x in cam.upper() for x in ("ILCE", "ILME", "PXW", "FDR", "BURANO"))
+                and "SONY" not in cam.upper()
+            ):
                 cam = "Sony " + cam
             result["camera"] = cam
 
@@ -913,8 +1018,17 @@ def extract_camera_xml_metadata(video_path: str | Path, *, enrich_with_exiftool:
     if enrich_with_exiftool:
         try:
             exif_data = extract_metadata_with_exiftool(video_path)
-            for key in ("camera", "lens", "iso", "f_number", "shutter_speed",
-                        "focal_length", "white_balance", "gamma", "codec"):
+            for key in (
+                "camera",
+                "lens",
+                "iso",
+                "f_number",
+                "shutter_speed",
+                "focal_length",
+                "white_balance",
+                "gamma",
+                "codec",
+            ):
                 if exif_data.get(key) and not result.get(key):
                     result[key] = exif_data[key]
         except Exception:
@@ -927,7 +1041,10 @@ def extract_camera_xml_metadata(video_path: str | Path, *, enrich_with_exiftool:
 # Fingerprinting (fast duplicate detection)
 # ---------------------------------------------------------------------------
 
-def fast_fingerprint(path: str | Path, sample_bytes: int = 4 * 1024 * 1024, duration: float | None = None) -> str:
+
+def fast_fingerprint(
+    path: str | Path, sample_bytes: int = 4 * 1024 * 1024, duration: float | None = None
+) -> str:
     """
     Very fast, effective fingerprint:
     file size + duration (from metadata) + xxh3 hash of first N bytes.
@@ -949,6 +1066,7 @@ def fast_fingerprint(path: str | Path, sample_bytes: int = 4 * 1024 * 1024, dura
 # ---------------------------------------------------------------------------
 # Preview generation (the heart of "low resolution preview images")
 # ---------------------------------------------------------------------------
+
 
 def _ffmpeg_seek_time(duration: float | None) -> float:
     """Choose a good single-frame time for thumbnail (avoid first 1.5s of black)."""
@@ -985,10 +1103,14 @@ def generate_thumbnail(
 
     cmd = [
         str(ffmpeg),
-        "-ss", str(seek),
-        "-i", str(video_path),
-        "-frames:v", "1",
-        "-q:v", "2",           # high quality source frame
+        "-ss",
+        str(seek),
+        "-i",
+        str(video_path),
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",  # high quality source frame
         "-y",
         str(tmp_path),
     ]
@@ -1051,10 +1173,14 @@ def generate_storyboard(
             frame_path = tmpdir / f"f{i:02d}.jpg"
             cmd = [
                 str(ffmpeg),
-                "-ss", str(t),
-                "-i", str(video_path),
-                "-frames:v", "1",
-                "-q:v", "2",
+                "-ss",
+                str(t),
+                "-i",
+                str(video_path),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
                 "-y",
                 str(frame_path),
             ]
@@ -1119,11 +1245,11 @@ def generate_previews(
     Storyboards are always the same pixel dimensions for a given
     cols/rows/cell size (see generate_storyboard for details).
     """
-    thumb = generate_thumbnail(
-        video_path, catalog_root, video_id, width=thumb_width
-    )
+    thumb = generate_thumbnail(video_path, catalog_root, video_id, width=thumb_width)
     board = generate_storyboard(
-        video_path, catalog_root, video_id,
+        video_path,
+        catalog_root,
+        video_id,
         cols=storyboard_cols,
         rows=storyboard_rows,
         cell_width=storyboard_cell_width,
@@ -1155,9 +1281,11 @@ def extract_audio_track(
     sample_rate: int = 16000,
     channels: int = 1,
     format: str = "wav",
-    duration: float | None = None,   # optional: limit extraction to first N seconds (useful for very long files)
-    bitrate: str | None = None,      # e.g. "128k" for MP3 or "64k" for AAC. Only for lossy formats.
-    audio_filters: str | None = None,  # Full -af filter graph. When provided, enables the production transcription proxy chain.
+    duration: float
+    | None = None,  # optional: limit extraction to first N seconds (useful for very long files)
+    bitrate: str | None = None,  # e.g. "128k" for MP3 or "64k" for AAC. Only for lossy formats.
+    audio_filters: str
+    | None = None,  # Full -af filter graph. When provided, enables the production transcription proxy chain.
 ) -> Path:
     """
     Extract (and optionally process) audio from a video file using ffmpeg.
@@ -1185,8 +1313,10 @@ def extract_audio_track(
 
     cmd = [
         str(ffmpeg),
-        "-ss", "0",
-        "-i", str(video_path),
+        "-ss",
+        "0",
+        "-i",
+        str(video_path),
         "-vn",
     ]
 
@@ -1232,7 +1362,9 @@ def extract_audio_track(
     return output_path
 
 
-def _compute_mono_peak_norm_gain(video_path: str | Path, target_db: float = None, max_duration: float | None = None) -> float:
+def _compute_mono_peak_norm_gain(
+    video_path: str | Path, target_db: float = None, max_duration: float | None = None
+) -> float:
     """Fast detection pass: compute the volume gain (in dB) needed after mono downmix
     so that the peak level of the mono signal reaches exactly target_db.
 
@@ -1248,14 +1380,17 @@ def _compute_mono_peak_norm_gain(video_path: str | Path, target_db: float = None
     vp = Path(video_path).expanduser().resolve()
     cmd = [
         str(ffmpeg),
-        "-i", str(vp),
+        "-i",
+        str(vp),
         "-vn",
     ]
     if max_duration:
         cmd += ["-t", str(max_duration)]
     cmd += [
-        "-af", "pan=mono|c0=0.5*c0+0.5*c1,volumedetect",
-        "-f", "null",
+        "-af",
+        "pan=mono|c0=0.5*c0+0.5*c1,volumedetect",
+        "-f",
+        "null",
         "-",
     ]
     try:
@@ -1331,12 +1466,14 @@ def ensure_cached_audio(
     audio_dir = get_audio_dir(catalog_root)
     for legacy in (
         audio_dir / f"{clip_id:06d}.wav",
-        audio_dir / f"{clip_id}.wav",   # old unpadded
+        audio_dir / f"{clip_id}.wav",  # old unpadded
     ):
         if legacy.exists() and legacy != target:
             try:
                 legacy.unlink()
-                print(f"[Audio Cache] Removed legacy {legacy.name} (migrating clip {clip_id} to processed 24 kHz AAC proxy)")
+                print(
+                    f"[Audio Cache] Removed legacy {legacy.name} (migrating clip {clip_id} to processed 24 kHz AAC proxy)"
+                )
             except Exception:
                 pass
 
@@ -1357,7 +1494,9 @@ def ensure_cached_audio(
             audio_filters=audio_filters,
         )
         if target.exists() and target.stat().st_size > 200:
-            print(f"[Audio Cache] Created persistent transcription proxy: {target.name} (24 kHz AAC mono + peak norm to {TRANSCRIPTION_PROXY_NORM_DB}dB)")
+            print(
+                f"[Audio Cache] Created persistent transcription proxy: {target.name} (24 kHz AAC mono + peak norm to {TRANSCRIPTION_PROXY_NORM_DB}dB)"
+            )
 
             return target
     except Exception as ex:
@@ -1417,6 +1556,7 @@ def purge_legacy_wav_caches(catalog_root: Path, clip_ids: set[int] | None = None
         try:
             from minicat.core import db as _db
             from minicat.core.models import SearchFilters
+
             videos = _db.search_videos(catalog_root, SearchFilters(), limit=200000)
             clip_ids = {int(v.id) for v in videos if getattr(v, "id", None)}
         except Exception:
@@ -1443,7 +1583,7 @@ def rebuild_cached_audio_for_clip(
     video_path: str | Path,
     clip_id: int,
     catalog_root: Path,
-    progress_callback: Optional[Callable[[str], None]] = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> bool:
     """
     Force re-extraction (with full production pre-processing) of the single
@@ -1454,7 +1594,9 @@ def rebuild_cached_audio_for_clip(
     clear_cached_audio(clip_id, catalog_root)
 
     if progress_callback:
-        progress_callback("Rebuilding transcription proxy audio (24 kHz AAC mono + -3dB peak norm)...")
+        progress_callback(
+            "Rebuilding transcription proxy audio (24 kHz AAC mono + -3dB peak norm)..."
+        )
 
     # Rebuild full length (no duration limit on explicit rebuild)
     audio_path = ensure_cached_audio(video_path, clip_id, catalog_root, max_duration=None)
@@ -1529,13 +1671,15 @@ def load_transcript_segments(
                         sin = float(times[0])
                         sout = float(times[1])
                         if sout > sin + 0.01:
-                            segs.append({
-                                "text": text,
-                                "source_in": sin,
-                                "source_out": sout,
-                                "prefix": f"[{prefix}]",
-                                "file": str(p),
-                            })
+                            segs.append(
+                                {
+                                    "text": text,
+                                    "source_in": sin,
+                                    "source_out": sout,
+                                    "prefix": f"[{prefix}]",
+                                    "file": str(p),
+                                }
+                            )
                     except Exception:
                         continue
         return segs
@@ -1634,7 +1778,7 @@ def resolve_source_range_for_text(
                 pre_cands.append((ratio, s))
         if pre_cands:
             # leftmost among reasonable prefix matches
-            pre_cands.sort(key=lambda x: ( -x[0], x[1]["source_in"] ))
+            pre_cands.sort(key=lambda x: (-x[0], x[1]["source_in"]))
             pre_line = pre_cands[0][1]
     if pre_line:
         sin = pre_line["source_in"]
@@ -1658,8 +1802,12 @@ def resolve_source_range_for_text(
                 inter3 = len(q3 & nt_words)
                 # extend if the line text is largely contained (even partial), or strong overlap,
                 # or the line is a direct continuation in time from current sout with content words in q
-                if (nt in q or q in nt or inter3 >= 3 or
-                        (s["source_in"] - sout < 1.0 and inter3 >= 2)):
+                if (
+                    nt in q
+                    or q in nt
+                    or inter3 >= 3
+                    or (s["source_in"] - sout < 1.0 and inter3 >= 2)
+                ):
                     sout = max(sout, s["source_out"])
                 else:
                     # stop only if we've already covered a reasonable block and this line
@@ -1758,7 +1906,7 @@ def resolve_source_range_for_text(
     cand_sin = 0.0
     cand_sout = 0.0
     # pick up whatever the earlier branches set (pre_line path or scored path)
-    if 'sin' in locals() and 'sout' in locals():
+    if "sin" in locals() and "sout" in locals():
         cand_sin = sin
         cand_sout = sout
     # start from whatever the paths above produced (or 0 if none)
@@ -1768,7 +1916,8 @@ def resolve_source_range_for_text(
         # rebuild a candidate set from any line with decent overlap
         for s in transcript_segs:
             nt = _normalize_for_match(s.get("text", ""))
-            if len(nt) <= 8: continue
+            if len(nt) <= 8:
+                continue
             sw = set(re.findall(r"\w{2,}", nt))
             if len(q_words & sw) >= 2:
                 matches.append(s)
@@ -1836,7 +1985,9 @@ def resolve_source_range_for_text(
             so = s["source_out"]
             sw3 = set(re.findall(r"\w{3,}", _normalize_for_match(s.get("text", ""))))
             has_overlap = len(q3 & sw3) >= 1
-            inside_or_bridge = (si >= final_sin - 1.0 and so <= final_sout + 1.0) or (si < final_sout + 0.5 and so > final_sin - 0.5)
+            inside_or_bridge = (si >= final_sin - 1.0 and so <= final_sout + 1.0) or (
+                si < final_sout + 0.5 and so > final_sin - 0.5
+            )
             if has_overlap and inside_or_bridge:
                 final_sin = min(final_sin, si)
                 final_sout = max(final_sout, so)
@@ -1912,13 +2063,13 @@ def repair_journalist_segments_with_transcript(
             new_seg["start"] = sin
             new_seg["end"] = sout
             # helpful debug
-            orig_in = seg.get('source_in') or seg.get('start', 0)
-            orig_out = seg.get('source_out') or seg.get('end', 0)
+            orig_in = seg.get("source_in") or seg.get("start", 0)
+            orig_out = seg.get("source_out") or seg.get("end", 0)
             orig_dur = float(orig_out) - float(orig_in) if orig_out else 0
             new_dur = sout - sin
             grew = ""
             if new_dur > orig_dur + 0.1:
-                grew = f" [GREW +{new_dur-orig_dur:.1f}s to cover full quote]"
+                grew = f" [GREW +{new_dur - orig_dur:.1f}s to cover full quote]"
             print(f"[repair_transcript] '{q[:40]}...' -> {sin}s–{sout}s (was {orig_in}) {grew}")
         repaired.append(new_seg)
     return repaired
@@ -1931,20 +2082,28 @@ def _match_source_video(seg: dict[str, Any], catalog_videos: list[Any]) -> Any |
     """
     if not catalog_videos:
         return None
-    fn = (seg.get("source_filename") or seg.get("source_path") or seg.get("source_label") or "").strip()
+    fn = (
+        seg.get("source_filename") or seg.get("source_path") or seg.get("source_label") or ""
+    ).strip()
     if not fn:
         return None
     fn_lower = fn.lower()
     stem = Path(fn).stem.lower()
     for v in catalog_videos:
         try:
-            vfn = getattr(v, "filename", None) or (Path(getattr(v, "path", "")).name if getattr(v, "path", None) else "")
+            vfn = getattr(v, "filename", None) or (
+                Path(getattr(v, "path", "")).name if getattr(v, "path", None) else ""
+            )
             if not vfn:
                 continue
             vfn_l = str(vfn).lower()
             vstem = Path(vfn).stem.lower()
             vpath = str(getattr(v, "path", "") or "").lower()
-            if (fn_lower and fn_lower in vfn_l) or (stem and stem in vstem) or (fn_lower and fn_lower in vpath):
+            if (
+                (fn_lower and fn_lower in vfn_l)
+                or (stem and stem in vstem)
+                or (fn_lower and fn_lower in vpath)
+            ):
                 return v
             # also exact name match
             if vfn_l == fn_lower or vstem == stem:
@@ -1984,6 +2143,7 @@ def repair_director_version_with_transcripts(
     if not catalog_root:
         try:
             from minicat.ui.app import get_state
+
             st = get_state()
             catalog_root = getattr(st, "catalog_root", None) if st else None
         except Exception:
@@ -1996,6 +2156,7 @@ def repair_director_version_with_transcripts(
     if not catalog_videos:
         try:
             from minicat.ui.app import get_state
+
             st = get_state()
             catalog_videos = getattr(st, "videos", None) or []
         except Exception:
@@ -2036,7 +2197,9 @@ def repair_director_version_with_transcripts(
             # This ensures resolve matches against the correct language version of the transcript.
             lang = new_it.get("lang") or new_it.get("language") or default_lang or "fi"
             if v:
-                vid_lang = getattr(v, "_current_transcription_lang", None) or getattr(v, "original_language", None)
+                vid_lang = getattr(v, "_current_transcription_lang", None) or getattr(
+                    v, "original_language", None
+                )
                 if vid_lang:
                     lang = vid_lang
             trans = load_transcript_segments(catalog_root, int(clip_id), str(lang))
@@ -2065,8 +2228,10 @@ def repair_director_version_with_transcripts(
                 new_dur = sout - sin
                 grew = ""
                 if new_dur > orig_dur + 0.1:
-                    grew = f" [GREW +{new_dur-orig_dur:.1f}s to cover full quote from sidecar]"
-                print(f"[repair_director_transcript] [{new_it.get('source_label','?')}] '{q[:35]}...' -> {sin}s–{sout}s (was {orig_in}) {grew}")
+                    grew = f" [GREW +{new_dur - orig_dur:.1f}s to cover full quote from sidecar]"
+                print(
+                    f"[repair_director_transcript] [{new_it.get('source_label', '?')}] '{q[:35]}...' -> {sin}s–{sout}s (was {orig_in}) {grew}"
+                )
             repaired_items.append(new_it)
         return repaired_items
 
@@ -2110,7 +2275,7 @@ def get_available_subtitle_languages(clip_id: int, catalog_root: Path) -> list[t
         if name == padded:
             results.append(("original", "Original"))
         elif name.startswith(padded + "_"):
-            lang_code = name[len(padded) + 1:]
+            lang_code = name[len(padded) + 1 :]
             # Simple display name (can be improved later with a proper map)
             display = lang_code.upper()
             if lang_code.lower() in ("fi", "fin"):
@@ -2151,7 +2316,13 @@ def _format_offset_timecode(seconds: float, fps: float = 25.0) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}:{f:02d}"
 
 
-def segments_to_plain_text(segments: list[dict], include_timestamps: bool = True, *, fps: float | None = None, base_timecode: str | None = None) -> str:
+def segments_to_plain_text(
+    segments: list[dict],
+    include_timestamps: bool = True,
+    *,
+    fps: float | None = None,
+    base_timecode: str | None = None,
+) -> str:
     """Convert segments to a simple readable plain text transcript.
     Always sorts by time for sane output even if stored list had ordering issues.
 
@@ -2175,6 +2346,7 @@ def segments_to_plain_text(segments: list[dict], include_timestamps: bool = True
         looks_like_transcript = bool(segs and any("start" in s for s in segs[:3]))
         if looks_like_transcript:
             from minicat.ai.transcriber import sanitize_transcription_segments
+
             # Use the highest end time present as a proxy for "known duration" so end-cluster
             # repair can still trigger for old data that lacks an external duration.
             proxy_dur = None
@@ -2189,7 +2361,9 @@ def segments_to_plain_text(segments: list[dict], include_timestamps: bool = True
 
     # Defensive sort (sanitizer should have done this, but old data or direct calls may not)
     try:
-        sorted_segs = sorted(segments or [], key=lambda s: float(s.get("source_in") or s.get("start") or 0))
+        sorted_segs = sorted(
+            segments or [], key=lambda s: float(s.get("source_in") or s.get("start") or 0)
+        )
     except Exception:
         sorted_segs = segments or []
 
@@ -2232,7 +2406,6 @@ def format_transcript_timecode(
         fps = 25.0
     start = float(start or 0)
     end = float(end or 0)
-    sec_part = f"{start:.1f}s → {end:.1f}s"
     if base_timecode and str(base_timecode).strip() not in ("", "00:00:00:00"):
         tc_start = _add_duration_to_timecode(str(base_timecode), start, fps)
         tc_end = _add_duration_to_timecode(str(base_timecode), end, fps)
@@ -2242,7 +2415,15 @@ def format_transcript_timecode(
     return f"[{tc_start} ({start:.1f}s) → {tc_end} ({end:.1f}s)]"
 
 
-def save_transcription_txt(clip_id: int, catalog_root: Path, segments: list[dict], lang: str = "original", *, fps: float | None = None, base_timecode: str | None = None) -> Path | None:
+def save_transcription_txt(
+    clip_id: int,
+    catalog_root: Path,
+    segments: list[dict],
+    lang: str = "original",
+    *,
+    fps: float | None = None,
+    base_timecode: str | None = None,
+) -> Path | None:
     """Save plain text transcript (.txt) to /transcriptions.
     If fps is provided, the output lines will include frame-accurate timecodes
     (HH:MM:SS:FF) next to the seconds.
@@ -2257,11 +2438,13 @@ def save_transcription_txt(clip_id: int, catalog_root: Path, segments: list[dict
     if not fps or fps <= 0 or base_timecode is None:
         try:
             from minicat.core import db as _db
+
             vids = _db.get_videos_by_ids(catalog_root, [clip_id])
             if vids:
                 v = vids[0]
                 if not fps or fps <= 0:
                     from minicat.core.video import confirm_video_framerate
+
                     fps = confirm_video_framerate(v.path)
                 if base_timecode is None:
                     base_timecode = getattr(v, "tc_start", None)
@@ -2301,7 +2484,14 @@ def save_transcription_txt(clip_id: int, catalog_root: Path, segments: list[dict
         return None
 
 
-def save_transcription_srt(clip_id: int, catalog_root: Path, segments: list[dict], lang: str = "original", fps: float | None = None, base_timecode: str | None = None) -> Path | None:
+def save_transcription_srt(
+    clip_id: int,
+    catalog_root: Path,
+    segments: list[dict],
+    lang: str = "original",
+    fps: float | None = None,
+    base_timecode: str | None = None,
+) -> Path | None:
     """
     Save the given segments as an .srt file in the /subtitles folder.
 
@@ -2328,20 +2518,25 @@ def save_transcription_srt(clip_id: int, catalog_root: Path, segments: list[dict
     if not fps or fps <= 0:
         try:
             from minicat.core import db as _db
+
             vids = _db.get_videos_by_ids(catalog_root, [clip_id])
             if vids:
                 video_path = vids[0].path
+                from minicat.core.video import confirm_video_framerate
+
                 fps = confirm_video_framerate(video_path)
         except Exception:
             pass
     if not fps or fps <= 0 or base_timecode is None:
         try:
             from minicat.core import db as _db
+
             vids = _db.get_videos_by_ids(catalog_root, [clip_id])
             if vids:
                 v = vids[0]
                 if not fps or fps <= 0:
                     from minicat.core.video import confirm_video_framerate
+
                     fps = confirm_video_framerate(v.path)
                 if base_timecode is None:
                     base_timecode = getattr(v, "tc_start", None)
@@ -2360,9 +2555,12 @@ def save_transcription_srt(clip_id: int, catalog_root: Path, segments: list[dict
         # Full YLE timing redistribution (that can adjust starts for reading
         # speed and strict gaps) is still used for AI cut exports and burned subs.
         from minicat.ai.transcriber import source_transcript_to_srt_segments
+
         processed_segments = source_transcript_to_srt_segments(segments, fps=fps)
 
-        srt_content = segments_to_srt(processed_segments, strict_timing=True, fps=fps, base_timecode=base_timecode)
+        srt_content = segments_to_srt(
+            processed_segments, strict_timing=True, fps=fps, base_timecode=base_timecode
+        )
 
         target = get_subtitle_srt_path(clip_id, catalog_root, lang)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -2376,10 +2574,11 @@ def save_transcription_srt(clip_id: int, catalog_root: Path, segments: list[dict
         # better results by converting the .ass (or using Subtitle Edit on the pair).
         try:
             from minicat.ai.transcriber import segments_to_ass
+
             ass_content = segments_to_ass(
                 segments,  # raw segments; function will format + snap internally
                 title=f"CAT+TAG Transcript {clip_id} ({lang})",
-                fps=fps or 25.0
+                fps=fps or 25.0,
             )
             ass_target = target.with_suffix(".ass")
             ass_target.write_text(ass_content, encoding="utf-8")
@@ -2393,7 +2592,9 @@ def save_transcription_srt(clip_id: int, catalog_root: Path, segments: list[dict
         return None
 
 
-def cleanup_orphaned_catalog_files(catalog_root: Path, existing_clip_ids: set[int] | None = None) -> int:
+def cleanup_orphaned_catalog_files(
+    catalog_root: Path, existing_clip_ids: set[int] | None = None
+) -> int:
     """
     Automatic maintenance: remove orphaned files from the catalog that no longer have
     a corresponding clip.
@@ -2403,7 +2604,7 @@ def cleanup_orphaned_catalog_files(catalog_root: Path, existing_clip_ids: set[in
     - Plain transcripts (<catalog>/transcriptions/ 00000x*.txt and legacy)
     - Subtitles (<catalog>/subtitles/ 00000x*.srt + *.ass companions)
     - Preview thumbnails and storyboards (in <catalog>/previews/thumbs and /boards, named 000042.jpg etc.)
-    - Proxy files (<catalog>/proxies/**  <stem>_proxy.* or id-containing) 
+    - Proxy files (<catalog>/proxies/**  <stem>_proxy.* or id-containing)
     - Stale FTS search entries and dangling video_tags (ensures *no* clip information remains in the .db after deletes)
 
     The DB safety purge (FTS + video_tags) ALWAYS runs.
@@ -2429,10 +2630,18 @@ def cleanup_orphaned_catalog_files(catalog_root: Path, existing_clip_ids: set[in
     active_stems: set[str] = set()
     try:
         if videos:
-            active_stems = {Path(getattr(v, "filename", "") or "").stem for v in videos if getattr(v, "filename", None)}
+            active_stems = {
+                Path(getattr(v, "filename", "") or "").stem
+                for v in videos
+                if getattr(v, "filename", None)
+            }
         else:
             vids = _db.search_videos(catalog_root, limit=100000)
-            active_stems = {Path(getattr(v, "filename", "") or "").stem for v in vids if getattr(v, "filename", None)}
+            active_stems = {
+                Path(getattr(v, "filename", "") or "").stem
+                for v in vids
+                if getattr(v, "filename", None)
+            }
     except Exception:
         active_stems = set()
 
@@ -2487,12 +2696,16 @@ def cleanup_orphaned_catalog_files(catalog_root: Path, existing_clip_ids: set[in
                                 f.unlink()
                                 deleted += 1
                                 audio_deleted += 1
-                                print(f"[Audio Cache] Removed legacy WAV for live clip {cid}: {f.name}")
+                                print(
+                                    f"[Audio Cache] Removed legacy WAV for live clip {cid}: {f.name}"
+                                )
                             except Exception:
                                 pass
 
     if audio_deleted:
-        print(f"[Audio Cache] Cleanup complete: removed {audio_deleted} orphaned/legacy audio file(s)")
+        print(
+            f"[Audio Cache] Cleanup complete: removed {audio_deleted} orphaned/legacy audio file(s)"
+        )
 
     # Clean orphaned transcription .txt and .srt files
     try:
@@ -2615,7 +2828,8 @@ def cleanup_orphaned_catalog_files(catalog_root: Path, existing_clip_ids: set[in
     # We force ensure_fts_consistency first to heal any stale FTS definition left from
     # old catalogs (the root cause of "no such column: T.tag_names" on videos_fts ops).
     try:
-        from minicat.core.db import get_connection, ensure_fts_consistency
+        from minicat.core.db import ensure_fts_consistency, get_connection
+
         ensure_fts_consistency(catalog_root)
         with get_connection(catalog_root) as conn:
             # FTS delete is best-effort (ensure above makes it safe in the common case);
@@ -2637,10 +2851,7 @@ def cleanup_orphaned_catalog_files(catalog_root: Path, existing_clip_ids: set[in
 
 
 def cleanup_all_generated_files_for_clip(
-    clip_id: int, 
-    catalog_root: Path, 
-    *,
-    original_filename: str | None = None
+    clip_id: int, catalog_root: Path, *, original_filename: str | None = None
 ) -> int:
     """
     Thoroughly removes all generated artifacts for a clip when it is deleted from the library.
@@ -2754,7 +2965,9 @@ def cleanup_all_generated_files_for_clip(
                         try:
                             f.unlink()
                             deleted += 1
-                            print(f"[Cleanup] Removed proxy (by name): {f.relative_to(proxies_root)}")
+                            print(
+                                f"[Cleanup] Removed proxy (by name): {f.relative_to(proxies_root)}"
+                            )
                         except Exception:
                             pass
     except Exception as ex:
@@ -2772,7 +2985,7 @@ def burn_subtitles_to_video(
     output_path: str | Path,
     *,
     use_ebu_style: bool = True,
-    progress_callback=None,   # optional callable(percent: float)
+    progress_callback=None,  # optional callable(percent: float)
 ) -> Path:
     """
     Burn subtitles into the video.
@@ -2792,6 +3005,7 @@ def burn_subtitles_to_video(
     try:
         if use_ebu_style and sub_path.suffix.lower() == ".srt":
             from minicat.ai.transcriber import segments_to_ass
+
             srt_content = sub_path.read_text(encoding="utf-8", errors="replace")
             segments = _parse_srt_to_segments(srt_content)
             # Quantize to the source video's fps so burned subs align to exact frames (fixes "wrong fps" in output)
@@ -2816,10 +3030,14 @@ def burn_subtitles_to_video(
         cmd = [
             str(ffmpeg),
             "-y",
-            "-i", str(video_path),
-            "-vf", vf,
-            "-c:a", "copy",
-            "-progress", "pipe:1",
+            "-i",
+            str(video_path),
+            "-vf",
+            vf,
+            "-c:a",
+            "copy",
+            "-progress",
+            "pipe:1",
             "-nostats",
             str(output_path),
         ]
@@ -2864,7 +3082,9 @@ def burn_subtitles_to_video(
                     stdout_remain = process.stdout.read() or ""
                 except Exception:
                     pass
-            raise RuntimeError(f"ffmpeg burn failed (code {process.returncode}):\n{stderr[:800] or stdout_remain[:800]}")
+            raise RuntimeError(
+                f"ffmpeg burn failed (code {process.returncode}):\n{stderr[:800] or stdout_remain[:800]}"
+            )
 
     finally:
         if temp_ass and temp_ass.exists():
@@ -2882,13 +3102,16 @@ def burn_subtitles_to_video(
 def _parse_srt_to_segments(srt_content: str) -> list[dict]:
     """Very lightweight SRT parser (only used internally for burning)."""
     import re
+
     segments = []
     blocks = re.split(r"\n\s*\n", srt_content.strip())
     for block in blocks:
         lines = [line.strip() for line in block.splitlines() if line.strip()]
         if len(lines) >= 3:
             time_line = lines[1]
-            match = re.match(r"(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})", time_line)
+            match = re.match(
+                r"(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})", time_line
+            )
             if match:
                 text = " ".join(lines[2:])
                 start = match.group(1).replace(",", ".")
@@ -2900,6 +3123,7 @@ def _parse_srt_to_segments(srt_content: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Proxy generation (new feature)
 # ---------------------------------------------------------------------------
+
 
 def _get_start_timecode(video_path: Path) -> tuple[str | None, float | None]:
     """Extract the original starting timecode and frame rate from a video file.
@@ -2914,12 +3138,18 @@ def _get_start_timecode(video_path: Path) -> tuple[str | None, float | None]:
     try:
         # Method 1: ffprobe format + stream tags (most common for camera originals)
         cmd = [
-            "ffprobe", "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "format_tags=timecode",
-            "-show_entries", "stream_tags=timecode,time_code,r_frame_rate,avg_frame_rate",
-            "-of", "json",
-            str(video_path)
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "format_tags=timecode",
+            "-show_entries",
+            "stream_tags=timecode,time_code,r_frame_rate,avg_frame_rate",
+            "-of",
+            "json",
+            str(video_path),
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         data = json.loads(result.stdout or "{}")
@@ -2972,10 +3202,14 @@ def _get_start_timecode(video_path: Path) -> tuple[str | None, float | None]:
         # "tags" dict is empty or the -show_entries limits it. Premiere reads this.
         try:
             cmd2 = [
-                "ffprobe", "-v", "quiet",
-                "-show_format", "-show_streams",
-                "-select_streams", "v:0",
-                str(video_path)
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-show_format",
+                "-show_streams",
+                "-select_streams",
+                "v:0",
+                str(video_path),
             ]
             res = subprocess.run(cmd2, capture_output=True, text=True, timeout=15)
             for line in (res.stdout or "").splitlines():
@@ -3074,7 +3308,7 @@ PROXY_PROFILE_DEFS: dict[str, dict] = {
         "vcodec_args": ["-profile:v", "dnxhr_lb", "-pixel_format", "yuv422p"],
         "acodec_args": ["-c:a", "pcm_s16le"],
     },
-    "H.264 \"Performance\" Proxy (720p)": {
+    'H.264 "Performance" Proxy (720p)': {
         "height": 720,
         "ext": ".mp4",
         "vcodec": "libx264",
@@ -3117,7 +3351,7 @@ def create_proxy(
     # Timecode options
     burn_original_timecode: bool = True,
     timecode_position: str = "bottom",  # "top" or "bottom"
-    progress_callback: Optional[Callable[[float, float], None]] = None,
+    progress_callback: Callable[[float, float], None] | None = None,
 ) -> Path:
     """
     Create a proxy using one of the 5 official CAT+TAG profiles.
@@ -3244,6 +3478,7 @@ def create_proxy(
 # XML Timeline Export (FCP7 XML - works in Premiere Pro + DaVinci Resolve)
 # ---------------------------------------------------------------------------
 
+
 def export_fcp7_xml(
     videos: list[Video],
     output_path: Path,
@@ -3355,7 +3590,7 @@ def export_fcp7_xml(
 
 
 def export_ai_journalist_cut_xml(
-    video: "Video",
+    video: Video,
     selected_segments: list[dict[str, Any]],
     output_path: Path,
     *,
@@ -3399,7 +3634,7 @@ def export_ai_journalist_cut_xml(
             start_timecode = "01:00:00:00"
 
     # Use the clip's actual fps if available
-    effective_fps = getattr(video, 'fps', None) or fps
+    effective_fps = getattr(video, "fps", None) or fps
     timebase = int(round(effective_fps))
     ntsc = "FALSE"
     if abs(effective_fps - 29.97) < 0.1:
@@ -3412,7 +3647,17 @@ def export_ai_journalist_cut_xml(
     # Always confirm pixel aspect ratio from the actual clip (HD/4K → square/1.0, never assume D1/DV PAL 1.0940)
     par = "square"
     try:
-        pcmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", "-select_streams", "v:0", str(getattr(video, "path", ""))]
+        pcmd = [
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-select_streams",
+            "v:0",
+            str(getattr(video, "path", "")),
+        ]
         pres = subprocess.run(pcmd, capture_output=True, text=True, timeout=10)
         pdata = json.loads(pres.stdout or "{}")
         for s in pdata.get("streams", []):
@@ -3444,7 +3689,9 @@ def export_ai_journalist_cut_xml(
     # =====================================================
     master_clip = ET.SubElement(children, "clipitem", id="master-clip-1")
     ET.SubElement(master_clip, "name").text = video.filename
-    ET.SubElement(master_clip, "duration").text = str(seconds_to_frames(getattr(video, 'duration', 3600), timebase))
+    ET.SubElement(master_clip, "duration").text = str(
+        seconds_to_frames(getattr(video, "duration", 3600), timebase)
+    )
 
     rate_master = ET.SubElement(master_clip, "rate")
     ET.SubElement(rate_master, "timebase").text = str(timebase)
@@ -3467,8 +3714,8 @@ def export_ai_journalist_cut_xml(
     ET.SubElement(rate_sample, "timebase").text = str(timebase)
     ET.SubElement(rate_sample, "ntsc").text = ntsc
 
-    width = getattr(video, 'width', 1920) or 1920
-    height = getattr(video, 'height', 1080) or 1080
+    width = getattr(video, "width", 1920) or 1920
+    height = getattr(video, "height", 1080) or 1080
     ET.SubElement(sample, "width").text = str(width)
     ET.SubElement(sample, "height").text = str(height)
     ET.SubElement(sample, "anamorphic").text = "FALSE"
@@ -3481,7 +3728,9 @@ def export_ai_journalist_cut_xml(
     track_master = ET.SubElement(video_media, "track")
     sample_clip = ET.SubElement(track_master, "clipitem", id="master-sample")
     ET.SubElement(sample_clip, "name").text = video.filename
-    ET.SubElement(sample_clip, "duration").text = str(seconds_to_frames(getattr(video, 'duration', 3600), timebase))
+    ET.SubElement(sample_clip, "duration").text = str(
+        seconds_to_frames(getattr(video, "duration", 3600), timebase)
+    )
     rate_s = ET.SubElement(sample_clip, "rate")
     ET.SubElement(rate_s, "timebase").text = str(timebase)
     ET.SubElement(rate_s, "ntsc").text = ntsc
@@ -3541,7 +3790,7 @@ def export_ai_journalist_cut_xml(
         out_point = seconds_to_frames(end_sec, timebase)
 
         clipitem = ET.SubElement(track, "clipitem", id=f"clipitem-{clip_id}")
-        ET.SubElement(clipitem, "name").text = f"{video.filename} - AI Cut {i+1}"
+        ET.SubElement(clipitem, "name").text = f"{video.filename} - AI Cut {i + 1}"
         ET.SubElement(clipitem, "duration").text = str(clip_frames)
 
         rate2 = ET.SubElement(clipitem, "rate")
@@ -3591,8 +3840,9 @@ def export_ai_journalist_cut_xml(
 # AI Journalist Cut — Rendered Video Export
 # ---------------------------------------------------------------------------
 
+
 def export_ai_journalist_cut_video(
-    video: "Video",
+    video: Video,
     selected_segments: list[dict[str, Any]],
     output_path: Path,
     *,
@@ -3624,8 +3874,8 @@ def export_ai_journalist_cut_video(
     preset / crf
         libx264 quality settings for the segment encoding pass (high quality defaults).
     """
-    import tempfile
     import subprocess
+    import tempfile
 
     if not selected_segments:
         raise ValueError("No segments provided for video export")
@@ -3656,7 +3906,14 @@ def export_ai_journalist_cut_video(
             s = float(seg.get("source_in") or seg.get("start", 0))
             e = float(seg.get("source_out") or seg.get("end", 0))
             if e > s + 0.05:  # at least 50ms
-                cleaned.append({"start": s, "end": e, "text": seg.get("text", ""), "reason": seg.get("reason", "")})
+                cleaned.append(
+                    {
+                        "start": s,
+                        "end": e,
+                        "text": seg.get("text", ""),
+                        "reason": seg.get("reason", ""),
+                    }
+                )
         except Exception:
             continue
 
@@ -3673,19 +3930,32 @@ def export_ai_journalist_cut_video(
             cmd = [
                 str(ffmpeg),
                 "-y",
-                "-ss", f"{seg['start']:.3f}",
-                "-to", f"{seg['end']:.3f}",
-                "-i", str(src),
-                "-c:v", "libx264",
-                "-preset", preset,
-                "-crf", str(crf),
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac",
-                "-b:a", audio_bitrate,
-                "-avoid_negative_ts", "make_zero",
-                "-movflags", "+faststart",
-                "-map", "0:v:0",
-                "-map", "0:a?",
+                "-ss",
+                f"{seg['start']:.3f}",
+                "-to",
+                f"{seg['end']:.3f}",
+                "-i",
+                str(src),
+                "-c:v",
+                "libx264",
+                "-preset",
+                preset,
+                "-crf",
+                str(crf),
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                audio_bitrate,
+                "-avoid_negative_ts",
+                "make_zero",
+                "-movflags",
+                "+faststart",
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
                 str(seg_path),
             ]
 
@@ -3693,7 +3963,9 @@ def export_ai_journalist_cut_video(
                 subprocess.run(cmd, check=True, capture_output=True, timeout=300)
             except subprocess.CalledProcessError as e:
                 err = e.stderr.decode("utf-8", errors="ignore")[:600] if e.stderr else str(e)
-                raise RuntimeError(f"Failed to cut segment {idx+1} ({seg['start']:.1f}s–{seg['end']:.1f}s): {err}") from e
+                raise RuntimeError(
+                    f"Failed to cut segment {idx + 1} ({seg['start']:.1f}s–{seg['end']:.1f}s): {err}"
+                ) from e
 
             if seg_path.exists() and seg_path.stat().st_size > 1000:
                 segment_files.append(seg_path)
@@ -3706,19 +3978,23 @@ def export_ai_journalist_cut_video(
         # Build concat list (concat demuxer format) - use absolute paths for robustness
         concat_list = tmpdir / "concat.txt"
         concat_list.write_text(
-            "\n".join(f"file '{p.resolve()}'" for p in segment_files),
-            encoding="utf-8"
+            "\n".join(f"file '{p.resolve()}'" for p in segment_files), encoding="utf-8"
         )
 
         # Final concat pass (stream copy — very fast)
         concat_cmd = [
             str(ffmpeg),
             "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_list),
-            "-c", "copy",
-            "-movflags", "+faststart",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
             str(out),
         ]
 
@@ -3739,6 +4015,7 @@ def export_ai_journalist_cut_video(
 # Automatic tags on import (resolution for video, "audio" for audio files)
 # ---------------------------------------------------------------------------
 
+
 def get_resolution_tag(width: int | None, height: int | None) -> str | None:
     """
     Return a concise tag based on vertical resolution.
@@ -3749,7 +4026,7 @@ def get_resolution_tag(width: int | None, height: int | None) -> str | None:
         return None
     try:
         w, h = int(width), int(height)
-        vert = min(w, h)          # correct vertical resolution regardless of orientation
+        vert = min(w, h)  # correct vertical resolution regardless of orientation
     except (TypeError, ValueError):
         return None
 
@@ -3789,8 +4066,9 @@ def get_auto_import_tags(
 # AI Journalist Cut — Audio Export (for pure audio sources)
 # ---------------------------------------------------------------------------
 
+
 def export_ai_journalist_cut_audio(
-    video: "Video",
+    video: Video,
     selected_segments: list[dict[str, Any]],
     output_path: Path,
     *,
@@ -3803,8 +4081,8 @@ def export_ai_journalist_cut_audio(
 
     This is the audio equivalent of export_ai_journalist_cut_video.
     """
-    import tempfile
     import subprocess
+    import tempfile
 
     if not selected_segments:
         raise ValueError("No segments provided for audio export")
@@ -3851,14 +4129,21 @@ def export_ai_journalist_cut_audio(
             cmd = [
                 str(ffmpeg),
                 "-y",
-                "-ss", f"{seg['start']:.3f}",
-                "-to", f"{seg['end']:.3f}",
-                "-i", str(src),
-                "-vn",                      # no video
-                "-acodec", "pcm_s16le",
-                "-ar", str(sample_rate),
-                "-ac", str(channels),
-                "-avoid_negative_ts", "make_zero",
+                "-ss",
+                f"{seg['start']:.3f}",
+                "-to",
+                f"{seg['end']:.3f}",
+                "-i",
+                str(src),
+                "-vn",  # no video
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                str(sample_rate),
+                "-ac",
+                str(channels),
+                "-avoid_negative_ts",
+                "make_zero",
                 str(seg_path),
             ]
 
@@ -3866,7 +4151,7 @@ def export_ai_journalist_cut_audio(
                 subprocess.run(cmd, check=True, capture_output=True, timeout=180)
             except subprocess.CalledProcessError as e:
                 err = e.stderr.decode("utf-8", errors="ignore")[:500] if e.stderr else str(e)
-                raise RuntimeError(f"Failed to cut audio segment {idx+1}: {err}") from e
+                raise RuntimeError(f"Failed to cut audio segment {idx + 1}: {err}") from e
 
             if seg_path.exists() and seg_path.stat().st_size > 100:
                 segment_files.append(seg_path)
@@ -3877,17 +4162,20 @@ def export_ai_journalist_cut_audio(
         # Concat via demuxer - use absolute paths for robustness
         concat_list = tmpdir / "concat.txt"
         concat_list.write_text(
-            "\n".join(f"file '{p.resolve()}'" for p in segment_files),
-            encoding="utf-8"
+            "\n".join(f"file '{p.resolve()}'" for p in segment_files), encoding="utf-8"
         )
 
         concat_cmd = [
             str(ffmpeg),
             "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_list),
-            "-c", "copy",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list),
+            "-c",
+            "copy",
             str(out),
         ]
 

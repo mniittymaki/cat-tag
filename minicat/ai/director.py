@@ -33,12 +33,12 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from pathlib import Path
 from typing import Any
 
 from minicat.core.settings import DEFAULT_GEMINI_MODEL, GEMINI_MODELS
 
-import re
 
 def detect_material_language(text: str, api_key: str | None = None) -> str:
     """
@@ -62,6 +62,7 @@ Transcript sample:
 
     try:
         from google import genai
+
         from minicat.core.settings import get_gemini_api_key
 
         key = api_key or get_gemini_api_key()
@@ -76,7 +77,7 @@ Transcript sample:
         raw = (response.text or "").strip().lower()
 
         # Extract a 2-letter code
-        match = re.search(r'\b([a-z]{2})\b', raw)
+        match = re.search(r"\b([a-z]{2})\b", raw)
         if match:
             code = match.group(1)
             # Validate common ones we support
@@ -116,7 +117,7 @@ def _extract_json(text: str) -> Any:
         pass
 
     # 2. Fix common LLM JSON sins (trailing commas) and retry
-    cleaned = re.sub(r',\s*([}\]])', r'\1', t)
+    cleaned = re.sub(r",\s*([}\]])", r"\1", t)
     try:
         return json.loads(cleaned)
     except Exception:
@@ -124,31 +125,31 @@ def _extract_json(text: str) -> Any:
 
     # 3. Extract the largest plausible JSON array by finding the outermost [ ... ]
     # Prefer the last occurrence of a full array in case of preamble text.
-    array_candidates = list(re.finditer(r'\[[\s\S]*\]', t))
+    array_candidates = list(re.finditer(r"\[[\s\S]*\]", t))
     for m in reversed(array_candidates):
         cand = m.group(0)
         # try to close it if truncated
-        cand = cand.rstrip().rstrip(',').rstrip()
-        if not cand.endswith(']'):
-            cand += ']'
+        cand = cand.rstrip().rstrip(",").rstrip()
+        if not cand.endswith("]"):
+            cand += "]"
         try:
             parsed = json.loads(cand)
             if isinstance(parsed, list):
                 return parsed
         except Exception:
             # try with trailing comma fix on this cand
-            cand2 = re.sub(r',\s*([}\]])', r'\1', cand)
+            cand2 = re.sub(r",\s*([}\]])", r"\1", cand)
             try:
                 parsed = json.loads(cand2)
                 if isinstance(parsed, list):
                     return parsed
-            except:
+            except Exception:
                 pass
 
     # 4. Salvage strategy for truncated generations: start from the first [ and
     # progressively trim the end until we get a valid list (or a prefix of it).
-    if '[' in t:
-        start = t.find('[')
+    if "[" in t:
+        start = t.find("[")
         partial = t[start:]
         # Try several trim lengths from the end
         for trim in range(0, min(len(partial), 3000), 30):
@@ -156,26 +157,28 @@ def _extract_json(text: str) -> Any:
                 try:
                     cand = partial[: max(10, len(partial) - trim - extra)].rstrip()
                     # attempt to terminate the array
-                    if not cand.rstrip().endswith(']'):
+                    if not cand.rstrip().endswith("]"):
                         # cut back to last complete object if possible
-                        last_close = cand.rfind('}')
+                        last_close = cand.rfind("}")
                         if last_close > 10:
-                            cand = cand[:last_close+1] + ']'
+                            cand = cand[: last_close + 1] + "]"
                         else:
-                            cand = cand.rstrip().rstrip(',') + ']'
+                            cand = cand.rstrip().rstrip(",") + "]"
                     parsed = json.loads(cand)
                     if isinstance(parsed, list) and len(parsed) > 0:
-                        print(f"[AI Director] Salvaged truncated JSON array (trimmed ~{trim} chars)")
+                        print(
+                            f"[AI Director] Salvaged truncated JSON array (trimmed ~{trim} chars)"
+                        )
                         return parsed
                 except Exception:
                     continue
 
     # 5. Last-ditch single object (rare for Director)
-    obj_match = re.search(r'\{[\s\S]*\}', t)
+    obj_match = re.search(r"\{[\s\S]*\}", t)
     if obj_match:
         try:
             cand = obj_match.group(0)
-            cand = re.sub(r',\s*([}\]])', r'\1', cand)
+            cand = re.sub(r",\s*([}\]])", r"\1", cand)
             return json.loads(cand)
         except Exception:
             pass
@@ -379,6 +382,7 @@ DIRECTOR_PURPOSE_GUIDANCE: dict[str, str] = {
 # LOW-LEVEL HELPERS (duplicated from journalist_cutter to keep that module untouched)
 # =============================================================================
 
+
 def _get_media_mime_type(path: Path) -> str:
     """Return a Gemini-compatible mime type for the given media file."""
     suffix = path.suffix.lower()
@@ -402,16 +406,8 @@ def _normalize_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized = []
     for seg in segments or []:
         try:
-            start = float(
-                seg.get("source_in")
-                or seg.get("start")
-                or seg.get("in", 0)
-            )
-            end = float(
-                seg.get("source_out")
-                or seg.get("end")
-                or seg.get("out", 0)
-            )
+            start = float(seg.get("source_in") or seg.get("start") or seg.get("in", 0))
+            end = float(seg.get("source_out") or seg.get("end") or seg.get("out", 0))
             text = (seg.get("text") or "").strip()
             if end <= start or not text:
                 continue
@@ -465,15 +461,17 @@ def _build_labeled_transcript_block(
         tc = f"[{start_hms} → {end_hms}]  ({start:.1f}s–{end:.1f}s)"
         lines.append(f"{tc} {text}")
 
-        augmented.append({
-            "source_in": round(start, 2),
-            "source_out": round(end, 2),
-            "text": text,
-            "source_label": label,
-            "source_filename": filename,
-            "source_path": seg.get("source_path"),
-            "source_clip_index": seg.get("source_clip_index"),
-        })
+        augmented.append(
+            {
+                "source_in": round(start, 2),
+                "source_out": round(end, 2),
+                "text": text,
+                "source_label": label,
+                "source_filename": filename,
+                "source_path": seg.get("source_path"),
+                "source_clip_index": seg.get("source_clip_index"),
+            }
+        )
 
     return "\n".join(lines).strip(), augmented
 
@@ -536,9 +534,8 @@ def build_combined_labeled_transcript(
 # VALIDATION (same contract as journalist_cutter for drop-in compatibility)
 # =============================================================================
 
-def _validate_and_normalize_versions(
-    data: Any, expected_count: int
-) -> list[dict[str, Any]]:
+
+def _validate_and_normalize_versions(data: Any, expected_count: int) -> list[dict[str, Any]]:
     """
     Validate and clean the JSON returned by Gemini.
     Preserves any source_* keys that were present on input segments.
@@ -585,7 +582,8 @@ def _validate_and_normalize_versions(
                             "source_in": round(start, 2),
                             "source_out": round(end, 2),
                             "text": text,
-                            "reason": item.get("reason") or "Selected for its contribution to the cross-source narrative.",
+                            "reason": item.get("reason")
+                            or "Selected for its contribution to the cross-source narrative.",
                         }
                         for k, val in item.items():
                             if k.startswith("source_") and k not in clean_seg:
@@ -594,7 +592,7 @@ def _validate_and_normalize_versions(
                             clean_seg["source_label"] = item["source_label"]
 
                         clean_segments.append(clean_seg)
-                        total += (end - start)
+                        total += end - start
                     except Exception:
                         continue
 
@@ -619,7 +617,8 @@ def _validate_and_normalize_versions(
                         "source_in": round(start, 2),
                         "source_out": round(end, 2),
                         "text": text,
-                        "reason": reason or "Selected for its contribution to the cross-source narrative.",
+                        "reason": reason
+                        or "Selected for its contribution to the cross-source narrative.",
                     }
 
                     for k, val in seg.items():
@@ -630,7 +629,7 @@ def _validate_and_normalize_versions(
                         clean_seg["source_label"] = str(seg["source"]).strip()
 
                     clean_segments.append(clean_seg)
-                    total += (end - start)
+                    total += end - start
                 except Exception:
                     continue
 
@@ -658,7 +657,9 @@ def _validate_and_normalize_versions(
             thinned_elements = _thin_narration_bridges(narrative_elements)
             version_dict["narrative_elements"] = thinned_elements
             # Also refresh the combined narration_text from the (now thinned) bridges for legacy consumers
-            remaining_bridges = [it.get("text", "") for it in thinned_elements if it.get("type") == "narration"]
+            remaining_bridges = [
+                it.get("text", "") for it in thinned_elements if it.get("type") == "narration"
+            ]
             if remaining_bridges:
                 version_dict["narration_text"] = "\n\n".join(remaining_bridges)
 
@@ -674,9 +675,7 @@ def _validate_and_normalize_versions(
     return versions[:expected_count]
 
 
-def validate_and_normalize_versions(
-    data: Any, expected_count: int
-) -> list[dict[str, Any]]:
+def validate_and_normalize_versions(data: Any, expected_count: int) -> list[dict[str, Any]]:
     """
     Public alias of the validator, for use by UI code (e.g. diversity retry logic).
     """
@@ -715,16 +714,18 @@ def get_narrative_sequence(version: dict) -> list[dict]:
                 continue
             t = item.get("type")
             if t == "clip":
-                elements.append({
-                    "type": "clip",
-                    "source_label": item.get("source_label"),
-                    "source_in": item.get("source_in"),
-                    "source_out": item.get("source_out"),
-                    "text": item.get("text"),
-                    "reason": item.get("reason"),
-                    "source_path": item.get("source_path"),
-                    "source_filename": item.get("source_filename"),
-                })
+                elements.append(
+                    {
+                        "type": "clip",
+                        "source_label": item.get("source_label"),
+                        "source_in": item.get("source_in"),
+                        "source_out": item.get("source_out"),
+                        "text": item.get("text"),
+                        "reason": item.get("reason"),
+                        "source_path": item.get("source_path"),
+                        "source_filename": item.get("source_filename"),
+                    }
+                )
             elif t == "narration":
                 text = (item.get("text") or "").strip()
                 if text:
@@ -736,16 +737,18 @@ def get_narrative_sequence(version: dict) -> list[dict]:
         # Legacy fallback for clips
         selected = version.get("selected_segments") or []
         for seg in selected:
-            elements.append({
-                "type": "clip",
-                "source_label": seg.get("source_label"),
-                "source_in": seg.get("source_in"),
-                "source_out": seg.get("source_out"),
-                "text": seg.get("text"),
-                "reason": seg.get("reason"),
-                "source_path": seg.get("source_path"),
-                "source_filename": seg.get("source_filename"),
-            })
+            elements.append(
+                {
+                    "type": "clip",
+                    "source_label": seg.get("source_label"),
+                    "source_in": seg.get("source_in"),
+                    "source_out": seg.get("source_out"),
+                    "text": seg.get("text"),
+                    "reason": seg.get("reason"),
+                    "source_path": seg.get("source_path"),
+                    "source_filename": seg.get("source_filename"),
+                }
+            )
 
     # If we have no explicit narration bridges from narrative_elements, treat the
     # AI Narration / Voiceover Script (narration_text) as a NARRATION BRIDGE (TTS)
@@ -759,7 +762,9 @@ def get_narrative_sequence(version: dict) -> list[dict]:
     return elements
 
 
-def _thin_narration_bridges(narrative_elements: list[dict], min_clips_between: int = 3) -> list[dict]:
+def _thin_narration_bridges(
+    narrative_elements: list[dict], min_clips_between: int = 3
+) -> list[dict]:
     """
     Safety net: if the model still produces too many narration bridges despite
     updated prompts (too dense = interrupts spoken clips too much), thin them out.
@@ -772,14 +777,12 @@ def _thin_narration_bridges(narrative_elements: list[dict], min_clips_between: i
 
     result = []
     clips_since_bridge = 0
-    last_was_clip = False
 
     for item in narrative_elements:
         itype = item.get("type")
         if itype == "clip":
             result.append(item)
             clips_since_bridge += 1
-            last_was_clip = True
         elif itype == "narration":
             text = (item.get("text") or "").strip()
             if not text:
@@ -792,7 +795,6 @@ def _thin_narration_bridges(narrative_elements: list[dict], min_clips_between: i
                 result.append({"type": "narration", "text": text})
                 clips_since_bridge = 0
             # else: drop this excessive bridge
-            last_was_clip = False
         else:
             result.append(item)
 
@@ -803,6 +805,7 @@ def _thin_narration_bridges(narrative_elements: list[dict], min_clips_between: i
 # =============================================================================
 # PROMPT CONSTRUCTION (Director-specific)
 # =============================================================================
+
 
 def _build_director_system_prompt(
     max_duration_seconds: float,
@@ -834,11 +837,10 @@ def _build_director_system_prompt(
         Punchy, exclamation-heavy, hook-driven setups. Pairs with engagement_bomb, commercial.
     If narration_style is None or falsy, NO narration bridges are generated (pure clip-only output).
     """
-    tone_block = DIRECTOR_TONE_INSTRUCTIONS.get(
-        tone, DIRECTOR_TONE_INSTRUCTIONS["newsroom"]
-    )
+    tone_block = DIRECTOR_TONE_INSTRUCTIONS.get(tone, DIRECTOR_TONE_INSTRUCTIONS["newsroom"])
     guidance = DIRECTOR_PURPOSE_GUIDANCE.get(
-        purpose, "Create a coherent, editorially strong short version by drawing from all available sources."
+        purpose,
+        "Create a coherent, editorially strong short version by drawing from all available sources.",
     )
 
     narrative_order_instruction = ""
@@ -884,17 +886,11 @@ You are working with material from {source_count} different original clips.
 
     # Narration / Voiceover bridge logic (refactored from boolean to flexible style enum)
     narration_enabled = bool(narration_style and str(narration_style).strip())
-    style = (str(narration_style).strip().lower() if narration_enabled else None)
+    style = str(narration_style).strip().lower() if narration_enabled else None
 
     if narration_enabled:
-        narration_field = '''"narrative_elements": [
-      {"type": "clip", "source_label": "C2", "source_in": 12.45, "source_out": 28.9, "text": "Exact verbatim text"},
-      {"type": "narration", "text": "Short connecting narration that makes the story flow and feel alive. Written in the tone of the PURPOSE and in the requested NARRATION STYLE."},
-      {"type": "clip", "source_label": "C1", "source_in": 45.1, "source_out": 52.8, "text": "Exact verbatim text"}
-    ]'''
-
         # Base critical instructions (sparing, purposeful, language-correct)
-        base_narration_critical = '''- When narration_style is provided, you MUST return "narrative_elements" (interleaved clip + narration) instead of the old flat "selected_segments".
+        base_narration_critical = """- When narration_style is provided, you MUST return "narrative_elements" (interleaved clip + narration) instead of the old flat "selected_segments".
 - "narrative_elements" MUST be an ordered array that alternates between "clip" (verbatim spoken) and "narration" bridges, but ONLY where a bridge adds real value.
 - IMPORTANT — PURPOSEFUL, SPARING NARRATION (not frequent):
   * Insert narration bridges sparingly and selectively — typically after every 3–5 spoken clip segments, or only at natural transitions, emotional turning points, thematic contrasts, or places where context/time/place/emotion needs a gentle bridge. 
@@ -904,58 +900,58 @@ You are working with material from {source_count} different original clips.
 - OPENING RULE: The very first element should almost always be a "clip". If you start with narration, keep the opening bridge very short (1 sentence max). Do NOT open with setup or exposition.
 - Narration text must be in the same language as the source clips ("{material_language}").
 - Do NOT dump one big narration block at the beginning or the end. Weave any bridges throughout the timeline only where they serve the story.
-'''
+"""
 
         # New user-controlled constraints for number and total length of bridges
         if narration_min_bridges > 0 or narration_max_bridges > 0:
             min_b = narration_min_bridges or 1
             max_b = narration_max_bridges or 8
-            base_narration_critical += f'''- NUMBER OF NARRATION BRIDGES (MANDATORY): You MUST produce between {min_b} and {max_b} discrete "narration" items in the narrative_elements for this version. Do not go below the min or above the max.
-'''
+            base_narration_critical += f"""- NUMBER OF NARRATION BRIDGES (MANDATORY): You MUST produce between {min_b} and {max_b} discrete "narration" items in the narrative_elements for this version. Do not go below the min or above the max.
+"""
         if narration_min_seconds > 0 or narration_max_seconds > 0:
             min_s = narration_min_seconds
-            max_s = narration_max_seconds or (narration_min_seconds * 3 if narration_min_seconds else 120)
-            base_narration_critical += f'''- TOTAL NARRATION DURATION BUDGET: The combined narration text you write (all bridges together) should be sized so that it would take approximately {min_s:.0f}–{max_s:.0f} seconds to speak at a natural, clear pace (~140-160 words per minute / ~2.5 words per second). Plan the amount of text accordingly. Do not make the narration dominate the spoken clips.
-'''
-
+            max_s = narration_max_seconds or (
+                narration_min_seconds * 3 if narration_min_seconds else 120
+            )
+            base_narration_critical += f"""- TOTAL NARRATION DURATION BUDGET: The combined narration text you write (all bridges together) should be sized so that it would take approximately {min_s:.0f}–{max_s:.0f} seconds to speak at a natural, clear pace (~140-160 words per minute / ~2.5 words per second). Plan the amount of text accordingly. Do not make the narration dominate the spoken clips.
+"""
 
         # Perspective / linguistic style instructions (the key addition for the new enum)
         style_instruction = ""
         if style == "omniscient":
-            style_instruction = '''
+            style_instruction = """
 NARRATION STYLE — OMNISCIENT (third-person journalistic):
 - Write all narration bridges in an objective, authoritative, third-person voice (e.g. "The team later discovered...", "What the data showed was...").
 - The narrator acts as a trusted journalistic guide: providing context, bridging time gaps between clips, surfacing contradictions or missing pieces, and balancing multiple sources without taking a personal side.
 - Tone should feel like a high-quality newsroom voice-over or prestige documentary narrator.
 - Avoid first-person ("I/We") unless it is literally a direct quote from a clip.
-'''
+"""
         elif style == "subjective":
-            style_instruction = '''
+            style_instruction = """
 NARRATION STYLE — SUBJECTIVE (first-person reflective / essay-film):
 - Write narration bridges in a first-person ("I/We") or deeply personal reflective voice, as if the director or a central participant is speaking directly to the viewer.
 - Add emotional shading, subtext, doubt, wonder, or personal connection. The narration can feel like an internal monologue, diary entry, or essay-film voice.
 - It is allowed (and often desirable) to comment on the feeling or meaning behind the clips rather than only the facts.
 - This style pairs naturally with confessional, legacy, visual_poem, or intimate documentary material.
-'''
+"""
         elif style == "explainer":
-            style_instruction = '''
+            style_instruction = """
 NARRATION STYLE — EXPLAINER (high-energy short-form / social media hook):
 - Write narration in a direct, energetic, snappy, almost YouTube/TikTok explainer or hype voice.
 - Use short, punchy sentences, exclamation, questions that hook the viewer, and clear "setup → payoff" structures.
 - The voice should feel like the text-to-speech layer on top of fast-cut social video — confident, slightly salesy or highly engaging, optimized for immediate attention.
 - Keep bridges extremely concise and forward-driving.
-'''
+"""
         else:
             # Generic fallback if an unknown style string is passed — still enable narration but keep it purposeful
-            style_instruction = '''
+            style_instruction = """
 NARRATION STYLE — CUSTOM / UNSPECIFIED:
 - Adapt the voice and perspective of the narration bridges to best serve the overall TONE and PURPOSE of the cut.
 - Keep bridges short, elegant, and in the language of the source material.
-'''
+"""
 
         narration_critical = base_narration_critical + style_instruction
     else:
-        narration_field = ""
         narration_critical = ""
 
     prompt = f"""
@@ -1034,6 +1030,7 @@ CRITICAL (FORMAT — MUST FOLLOW EXACTLY):
 # MAIN ENTRY POINT
 # =============================================================================
 
+
 def generate_director_cuts(
     segments: list[dict[str, Any]],
     max_duration_seconds: float,
@@ -1043,8 +1040,9 @@ def generate_director_cuts(
     tone: str = "newsroom",
     num_versions: int = 2,
     clean_fillers: bool = False,
-    narration_style: str | None = None,   # Optional: "omniscient" | "subjective" | "explainer" (enables narration bridges with specific linguistic perspective)
-    generate_narration: bool = False,     # Back-compat: if True and narration_style is None, treat as "omniscient"
+    narration_style: str
+    | None = None,  # Optional: "omniscient" | "subjective" | "explainer" (enables narration bridges with specific linguistic perspective)
+    generate_narration: bool = False,  # Back-compat: if True and narration_style is None, treat as "omniscient"
     material_language: str | None = None,  # Preferred: language from clip metadata
     model_name: str = DEFAULT_GEMINI_MODEL,
     api_key: str | None = None,
@@ -1053,10 +1051,10 @@ def generate_director_cuts(
     combined_transcript: str | None = None,
     source_count: int | None = None,
     # New controls for narration bridges (only used when narration_style is set)
-    narration_min_seconds: float = 0.0,   # min total spoken seconds for all bridges combined (0 = no min)
-    narration_max_seconds: float = 0.0,   # max total spoken seconds for all bridges combined (0 = no hard max, use "sparing")
-    narration_min_bridges: int = 0,       # min number of discrete "narration" items (0 = use default sparing heuristic)
-    narration_max_bridges: int = 0,       # max number of discrete "narration" items (0 = use default sparing heuristic)
+    narration_min_seconds: float = 0.0,  # min total spoken seconds for all bridges combined (0 = no min)
+    narration_max_seconds: float = 0.0,  # max total spoken seconds for all bridges combined (0 = no hard max, use "sparing")
+    narration_min_bridges: int = 0,  # min number of discrete "narration" items (0 = use default sparing heuristic)
+    narration_max_bridges: int = 0,  # max number of discrete "narration" items (0 = use default sparing heuristic)
 ) -> list[dict[str, Any]]:
     """
     Multi-source AI Director.
@@ -1109,6 +1107,7 @@ def generate_director_cuts(
 
     if not api_key:
         from minicat.core.settings import get_gemini_api_key
+
         api_key = get_gemini_api_key()
 
     if not api_key or not api_key.strip():
@@ -1170,6 +1169,7 @@ def generate_director_cuts(
             purpose=purpose,
             num_versions=num_versions,
             clean_fillers=clean_fillers,
+            generate_narration=generate_narration,
             source_media_path=None,
             effective_source_count=effective_source_count,
             narration_style=narration_style,
@@ -1254,7 +1254,7 @@ CRITICAL FOR RELIABLE OUTPUT: Keep "narrative_summary" to 1-2 sentences (max 35 
             repair_user = f"""
 The previous attempt produced this (possibly truncated or slightly malformed) output:
 
-{raw[:6000] if 'raw' in locals() else (response.text or '')[:6000] if 'response' in locals() else 'No raw captured'}
+{raw[:6000] if "raw" in locals() else (response.text or "")[:6000] if "response" in locals() else "No raw captured"}
 
 Please output a clean, complete JSON array of exactly {num_versions} version objects in the exact format previously requested for the Director.
 Use the moments from the original labeled transcript. Keep narrative_summary and reasons concise. Preserve all source_labels and verbatim text.
@@ -1279,9 +1279,7 @@ Use the moments from the original labeled transcript. Keep narrative_summary and
         except Exception as repair_err:
             print(f"[AI Director] JSON repair also failed: {repair_err}. Using simple fallback.")
             # Simple fallback: just take the first N segments across sources
-            return _create_simple_director_fallback(
-                normalized, max_duration_seconds, num_versions
-            )
+            return _create_simple_director_fallback(normalized, max_duration_seconds, num_versions)
 
 
 def _create_simple_director_fallback(
@@ -1328,13 +1326,15 @@ def _create_simple_director_fallback(
             total += dur
 
         if selected:
-            versions.append({
-                "version_id": chr(ord("A") + i),
-                "title": f"Fallback Version {chr(ord('A') + i)}",
-                "total_duration": round(total, 1),
-                "narrative_summary": "Fallback selection (AI generation failed).",
-                "selected_segments": selected,
-            })
+            versions.append(
+                {
+                    "version_id": chr(ord("A") + i),
+                    "title": f"Fallback Version {chr(ord('A') + i)}",
+                    "total_duration": round(total, 1),
+                    "narrative_summary": "Fallback selection (AI generation failed).",
+                    "selected_segments": selected,
+                }
+            )
 
     return versions
 
@@ -1342,6 +1342,7 @@ def _create_simple_director_fallback(
 # =============================================================================
 # TWO-STAGE VERBATIM DIRECTOR PIPELINE (for tone == "rewrite")
 # =============================================================================
+
 
 def _director_two_stage_rewrite(
     *,
@@ -1354,6 +1355,7 @@ def _director_two_stage_rewrite(
     purpose: str,
     num_versions: int,
     clean_fillers: bool,
+    generate_narration: bool = False,
     source_media_path: str | Path | None,
     effective_source_count: int,
     narration_style: str | None = None,
@@ -1384,7 +1386,7 @@ def _director_two_stage_rewrite(
     # --- Stage 1: Mine powerful verbatim moments across all sources ---
     print("[AI Director] Stage 1: Mining strongest moments across all clips...")
 
-    stage1_system = f"""
+    stage1_system = """
 You are a documentary scriptwriter and narrative architect preparing to build short non-fiction films from several separate interview recordings.
 
 You have been given one combined, explicitly labeled transcript. Every segment is marked with its source (C1, C2, ...).
@@ -1454,13 +1456,15 @@ Extract the strongest raw verbatim moments for building completely new narrative
             src = c.get("source_label") or c.get("source") or "Unknown"
             pot = (c.get("dramatic_potential") or "").strip()
             if e > s + 0.3 and txt:
-                valid_candidates.append({
-                    "source_in": round(s, 2),
-                    "source_out": round(e, 2),
-                    "text": txt,
-                    "source_label": str(src).strip(),
-                    "dramatic_potential": pot or "Strong moment",
-                })
+                valid_candidates.append(
+                    {
+                        "source_in": round(s, 2),
+                        "source_out": round(e, 2),
+                        "text": txt,
+                        "source_label": str(src).strip(),
+                        "dramatic_potential": pot or "Strong moment",
+                    }
+                )
         except Exception:
             continue
 
@@ -1497,7 +1501,7 @@ Extract the strongest raw verbatim moments for building completely new narrative
     print(f"[AI Director] Stage 2: Architecting {num_versions} new stories from mined moments...")
 
     narration_enabled = bool(narration_style and str(narration_style).strip())
-    style = (str(narration_style).strip().lower() if narration_enabled else None)
+    style = str(narration_style).strip().lower() if narration_enabled else None
 
     if narration_enabled:
         # Purposeful, sparing narration mode for the rewrite / scriptwriter path (with style)
@@ -1505,11 +1509,15 @@ Extract the strongest raw verbatim moments for building completely new narrative
         if narration_min_bridges or narration_max_bridges:
             minb = narration_min_bridges or 1
             maxb = narration_max_bridges or 6
-            narr_budget_lines.append(f"- NUMBER OF BRIDGES: Produce between {minb} and {maxb} discrete narration bridges for this version.")
+            narr_budget_lines.append(
+                f"- NUMBER OF BRIDGES: Produce between {minb} and {maxb} discrete narration bridges for this version."
+            )
         if narration_min_seconds or narration_max_seconds:
             mins = narration_min_seconds
             maxs = narration_max_seconds or (mins * 2.5 if mins else 90)
-            narr_budget_lines.append(f"- TOTAL NARRATION LENGTH: The combined text of all bridges should speak in roughly {mins:.0f}–{maxs:.0f} seconds at natural pace (~2.5 w/s). Size your narration text accordingly.")
+            narr_budget_lines.append(
+                f"- TOTAL NARRATION LENGTH: The combined text of all bridges should speak in roughly {mins:.0f}–{maxs:.0f} seconds at natural pace (~2.5 w/s). Size your narration text accordingly."
+            )
         budget_text = "\n".join(narr_budget_lines)
         if budget_text:
             budget_text = "\nNARRATION BUDGET (user specified):\n" + budget_text + "\n"
@@ -1639,7 +1647,7 @@ Keep narrative_summary to 1-2 sentences (max 35 words). Every reason must be one
             repair_user = f"""
 The previous attempt produced this (possibly malformed) output:
 
-{raw2[:4000] if 'raw2' in locals() else 'No raw output captured'}
+{raw2[:4000] if "raw2" in locals() else "No raw output captured"}
 
 Please output a clean JSON array of exactly {num_versions} version objects in the exact Director format previously requested.
 Use only the moments that were provided earlier. Preserve source labels.
@@ -1650,7 +1658,7 @@ Use only the moments that were provided earlier. Preserve source labels.
                 contents=[repair_system, repair_user],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    temperature=0.2,   # low temp for repair
+                    temperature=0.2,  # low temp for repair
                 ),
             )
             repaired = _extract_json(repair_resp.text.strip())
@@ -1658,7 +1666,9 @@ Use only the moments that were provided earlier. Preserve source labels.
             print("[AI Director] JSON repair succeeded.")
             return versions
         except Exception as repair_err:
-            print(f"[AI Director] JSON repair also failed: {repair_err}. Using single-pass fallback.")
+            print(
+                f"[AI Director] JSON repair also failed: {repair_err}. Using single-pass fallback."
+            )
             return _single_pass_director_fallback(
                 client=client,
                 model_name=model_name,
@@ -1700,7 +1710,6 @@ def _single_pass_director_fallback(
     from google.genai import types
 
     # Transcript-only mode — no audio fallback.
-    fb_media = None
 
     system = f"""
 You are a director building new short non-fiction stories from verbatim material across {effective_source_count} different interview clips.

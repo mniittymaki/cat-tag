@@ -30,8 +30,10 @@ def suggest_tags_from_storyboard(
     """
     # Safety net: validate model name
     if model_name not in GEMINI_MODELS:
-        print(f"[AI] Warning: Model '{model_name}' is not in the supported list. "
-              f"Falling back to {DEFAULT_GEMINI_MODEL}.")
+        print(
+            f"[AI] Warning: Model '{model_name}' is not in the supported list. "
+            f"Falling back to {DEFAULT_GEMINI_MODEL}."
+        )
         model_name = DEFAULT_GEMINI_MODEL
 
     try:
@@ -109,7 +111,11 @@ Return exactly a JSON array.
 
     except Exception as e:
         error_str = str(e)
-        if "401" in error_str or "invalid authentication" in error_str.lower() or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in error_str:
+        if (
+            "401" in error_str
+            or "invalid authentication" in error_str.lower()
+            or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in error_str
+        ):
             raise RuntimeError(
                 "Invalid Gemini API key.\n\n"
                 "Please make sure you created the key at:\n"
@@ -140,16 +146,17 @@ def suggest_tags_from_transcript(
     """
     # Safety net: validate model name
     if model_name not in GEMINI_MODELS:
-        print(f"[AI] Warning: Model '{model_name}' is not in the supported list. "
-              f"Falling back to {DEFAULT_GEMINI_MODEL}.")
+        print(
+            f"[AI] Warning: Model '{model_name}' is not in the supported list. "
+            f"Falling back to {DEFAULT_GEMINI_MODEL}."
+        )
         model_name = DEFAULT_GEMINI_MODEL
 
     try:
         from google import genai
     except ImportError as e:
         raise RuntimeError(
-            "AI features require 'google-genai'. "
-            "Please run: uv pip install google-genai"
+            "AI features require 'google-genai'. Please run: uv pip install google-genai"
         ) from e
 
     if not api_key or not api_key.strip():
@@ -160,7 +167,7 @@ def suggest_tags_from_transcript(
         transcript_text = segments.strip()
     else:
         parts: list[str] = []
-        for seg in (segments or []):
+        for seg in segments or []:
             t = ""
             if isinstance(seg, dict):
                 t = seg.get("text") or seg.get("content") or ""
@@ -205,7 +212,7 @@ Return exactly a JSON array.
     try:
         response = client.models.generate_content(
             model=model_name,
-            contents=[prompt],   # pure text, no image
+            contents=[prompt],  # pure text, no image
         )
 
         text = response.text.strip()
@@ -236,7 +243,11 @@ Return exactly a JSON array.
 
     except Exception as e:
         error_str = str(e)
-        if "401" in error_str or "invalid authentication" in error_str.lower() or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in error_str:
+        if (
+            "401" in error_str
+            or "invalid authentication" in error_str.lower()
+            or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in error_str
+        ):
             raise RuntimeError(
                 "Invalid Gemini API key.\n\n"
                 "Please make sure you created the key at:\n"

@@ -22,15 +22,14 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 from minicat.core.settings import (
-    get_tts_provider,
-    clean_tts_voice,
-    clean_tts_language,
-    get_tts_voice,
-    get_gcp_credentials_path,
     SUPPORTED_LANGUAGES,
+    clean_tts_language,
+    clean_tts_voice,
+    get_gcp_credentials_path,
+    get_tts_provider,
+    get_tts_voice,
 )
 from minicat.core.video import find_ffmpeg
 
@@ -45,24 +44,19 @@ except ImportError:
 # Language code -> Recommended high-quality Edge TTS voice
 # These are chosen for naturalness (Neural voices).
 LANGUAGE_TO_VOICE: dict[str, str] = {
-    "en": "en-US-AriaNeural",       # English (US) - very natural
+    "en": "en-US-AriaNeural",  # English (US) - very natural
     "en-us": "en-US-AriaNeural",
     "english": "en-US-AriaNeural",
-
     "fr": "fr-FR-DeniseNeural",
     "fr-fr": "fr-FR-DeniseNeural",
     "french": "fr-FR-DeniseNeural",
-
     "es": "es-ES-ElviraNeural",
     "es-es": "es-ES-ElviraNeural",
     "spanish": "es-ES-ElviraNeural",
-
     "fi": "fi-FI-NooraNeural",
     "finnish": "fi-FI-NooraNeural",
-
     "de": "de-DE-KatjaNeural",
     "german": "de-DE-KatjaNeural",
-
     "sv": "sv-SE-SofieNeural",
     "swedish": "sv-SE-SofieNeural",
 }
@@ -118,23 +112,28 @@ def get_google_voices_for_language(lang_code: str) -> list[tuple[str, str]]:
     # Expanded good WaveNet + Standard options per language
     alternatives = {
         "en": [
-            "en-US-Wavenet-D", "en-US-Wavenet-F",
-            "en-US-Standard-C", "en-US-Standard-D",
+            "en-US-Wavenet-D",
+            "en-US-Wavenet-F",
+            "en-US-Standard-C",
+            "en-US-Standard-D",
         ],
         "fi": [
             "fi-FI-Wavenet-A",
             "fi-FI-Standard-A",
         ],
         "fr": [
-            "fr-FR-Wavenet-C", "fr-FR-Wavenet-D",
+            "fr-FR-Wavenet-C",
+            "fr-FR-Wavenet-D",
             "fr-FR-Standard-C",
         ],
         "de": [
-            "de-DE-Wavenet-B", "de-DE-Wavenet-F",
+            "de-DE-Wavenet-B",
+            "de-DE-Wavenet-F",
             "de-DE-Standard-F",
         ],
         "es": [
-            "es-ES-Wavenet-B", "es-ES-Wavenet-C",
+            "es-ES-Wavenet-B",
+            "es-ES-Wavenet-C",
             "es-ES-Standard-C",
         ],
         "sv": [
@@ -171,6 +170,7 @@ def _ensure_google_tts_package() -> bool:
 
     try:
         import google.cloud.texttospeech  # noqa: F401
+
         return True
     except ImportError:
         pass
@@ -181,9 +181,9 @@ def _ensure_google_tts_package() -> bool:
     _google_tts_install_tried = True
     print("[TTS] google-cloud-texttospeech not found. Attempting automatic installation...")
 
+    import shutil
     import subprocess
     import sys
-    import shutil
 
     def _try_install(cmd, label):
         try:
@@ -209,24 +209,32 @@ def _ensure_google_tts_package() -> bool:
         if _try_install([uv_bin, "pip", "install", "google-cloud-texttospeech"], "uv pip install"):
             try:
                 import google.cloud.texttospeech  # noqa: F401
+
                 print("[TTS] Successfully auto-installed google-cloud-texttospeech.")
                 return True
             except ImportError:
                 pass
 
     # python -m uv
-    if _try_install([sys.executable, "-m", "uv", "pip", "install", "google-cloud-texttospeech"], "python -m uv pip"):
+    if _try_install(
+        [sys.executable, "-m", "uv", "pip", "install", "google-cloud-texttospeech"],
+        "python -m uv pip",
+    ):
         try:
             import google.cloud.texttospeech  # noqa: F401
+
             print("[TTS] Successfully auto-installed google-cloud-texttospeech.")
             return True
         except ImportError:
             pass
 
     # pip fallback
-    if _try_install([sys.executable, "-m", "pip", "install", "google-cloud-texttospeech"], "pip install"):
+    if _try_install(
+        [sys.executable, "-m", "pip", "install", "google-cloud-texttospeech"], "pip install"
+    ):
         try:
             import google.cloud.texttospeech  # noqa: F401
+
             print("[TTS] Successfully auto-installed google-cloud-texttospeech.")
             return True
         except ImportError:
@@ -237,7 +245,7 @@ def _ensure_google_tts_package() -> bool:
     return False
 
 
-def find_gcloud() -> Optional[str]:
+def find_gcloud() -> str | None:
     """Return absolute path to the gcloud binary if it can be located, else None.
 
     We search well-known locations because GUI apps (the .app bundle) often
@@ -265,8 +273,7 @@ def find_gcloud() -> Optional[str]:
     # 2. Ask brew for the location (very common on macOS)
     try:
         res = subprocess.run(
-            ["brew", "--prefix", "google-cloud-sdk"],
-            capture_output=True, text=True, timeout=3
+            ["brew", "--prefix", "google-cloud-sdk"], capture_output=True, text=True, timeout=3
         )
         if res.returncode == 0:
             prefix = res.stdout.strip()
@@ -277,9 +284,7 @@ def find_gcloud() -> Optional[str]:
         pass
 
     try:
-        res = subprocess.run(
-            ["brew", "--prefix"], capture_output=True, text=True, timeout=3
-        )
+        res = subprocess.run(["brew", "--prefix"], capture_output=True, text=True, timeout=3)
         if res.returncode == 0:
             prefix = res.stdout.strip()
             cand = os.path.join(prefix, "bin", "gcloud")
@@ -336,26 +341,21 @@ def get_voice_for_language(language: str | None) -> str:
 # ---------------------------------------------------------------------------
 GOOGLE_LANGUAGE_TO_VOICE: dict[str, str] = {
     # English - WaveNet voices are excellent and qualify for the 4M char free tier
-    "en": "en-US-Wavenet-F",       # Warm, natural female (recommended)
+    "en": "en-US-Wavenet-F",  # Warm, natural female (recommended)
     "en-us": "en-US-Wavenet-F",
     "english": "en-US-Wavenet-F",
-
     # Finnish - WaveNet is currently one of the best available
-    "fi": "fi-FI-Wavenet-A",       # Good Finnish female voice
+    "fi": "fi-FI-Wavenet-A",  # Good Finnish female voice
     "finnish": "fi-FI-Wavenet-A",
-
     # French
-    "fr": "fr-FR-Wavenet-C",       # Natural female
+    "fr": "fr-FR-Wavenet-C",  # Natural female
     "french": "fr-FR-Wavenet-C",
-
     # German
-    "de": "de-DE-Wavenet-F",       # Clear female
+    "de": "de-DE-Wavenet-F",  # Clear female
     "german": "de-DE-Wavenet-F",
-
     # Spanish (Spain)
-    "es": "es-ES-Wavenet-C",       # Good female
+    "es": "es-ES-Wavenet-C",  # Good female
     "spanish": "es-ES-Wavenet-C",
-
     # Swedish
     "sv": "sv-SE-Wavenet-A",
     "swedish": "sv-SE-Wavenet-A",
@@ -371,7 +371,9 @@ GOOGLE_LANGUAGE_TO_STANDARD_VOICE: dict[str, str] = {
     "sv": "sv-SE-Standard-A",
 }
 
-DEFAULT_GOOGLE_VOICE = "en-US-Wavenet-F"  # WaveNet preferred for quality (both WaveNet & Standard get 4M free tier)
+DEFAULT_GOOGLE_VOICE = (
+    "en-US-Wavenet-F"  # WaveNet preferred for quality (both WaveNet & Standard get 4M free tier)
+)
 
 # Module-level flag so we only attempt auto-install of piper-tts once per process
 # (prevents log spam when the UI re-renders status or the provider is local).
@@ -387,7 +389,6 @@ def reset_piper_install_flag() -> None:
     _piper_install_tried = False
 
 
-
 # =============================================================================
 # Local offline TTS via Piper (recommended default - zero cloud, zero auth)
 # =============================================================================
@@ -398,11 +399,13 @@ def reset_piper_install_flag() -> None:
 # Finnish has the official Harri (medium/low) + a high-quality community model (Asmo).
 
 PIPER_VOICES: dict[str, list[dict]] = {
-    "en": [{
-        "id": "en_US-lessac-medium",
-        "name": "Lessac (clear, natural US English)",
-        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
-    }],
+    "en": [
+        {
+            "id": "en_US-lessac-medium",
+            "name": "Lessac (clear, natural US English)",
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+        }
+    ],
     "fi": [
         {
             # High-quality community Finnish voice (2025, trained from scratch on synthetic data).
@@ -423,26 +426,34 @@ PIPER_VOICES: dict[str, list[dict]] = {
             "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/fi/fi_FI/harri/low/fi_FI-harri-low.onnx",
         },
     ],
-    "de": [{
-        "id": "de_DE-thorsten-medium",
-        "name": "Thorsten (German)",
-        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/thorsten/medium/de_DE-thorsten-medium.onnx",
-    }],
-    "fr": [{
-        "id": "fr_FR-siwis-medium",
-        "name": "Siwis (French)",
-        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/fr/fr_FR/siwis/medium/fr_FR-siwis-medium.onnx",
-    }],
-    "es": [{
-        "id": "es_ES-davefx-medium",
-        "name": "Davefx (Spanish)",
-        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/es/es_ES/davefx/medium/es_ES-davefx-medium.onnx",
-    }],
-    "sv": [{
-        "id": "sv_SE-nst-medium",
-        "name": "NST (Swedish)",
-        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/sv/sv_SE/nst/medium/sv_SE-nst-medium.onnx",
-    }],
+    "de": [
+        {
+            "id": "de_DE-thorsten-medium",
+            "name": "Thorsten (German)",
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/thorsten/medium/de_DE-thorsten-medium.onnx",
+        }
+    ],
+    "fr": [
+        {
+            "id": "fr_FR-siwis-medium",
+            "name": "Siwis (French)",
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/fr/fr_FR/siwis/medium/fr_FR-siwis-medium.onnx",
+        }
+    ],
+    "es": [
+        {
+            "id": "es_ES-davefx-medium",
+            "name": "Davefx (Spanish)",
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/es/es_ES/davefx/medium/es_ES-davefx-medium.onnx",
+        }
+    ],
+    "sv": [
+        {
+            "id": "sv_SE-nst-medium",
+            "name": "NST (Swedish)",
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/sv/sv_SE/nst/medium/sv_SE-nst-medium.onnx",
+        }
+    ],
 }
 
 
@@ -494,7 +505,7 @@ def _download_piper_model(voice_info: dict) -> Path:
     return onnx_path
 
 
-def ensure_piper_voice_model(language: str | None = None, voice_id: Optional[str] = None) -> Path:
+def ensure_piper_voice_model(language: str | None = None, voice_id: str | None = None) -> Path:
     """Make sure a suitable Piper .onnx model exists locally for the language.
     Auto-downloads the recommended (first) voice for the language on first use.
     Supports multiple voices per language (e.g. Finnish now has Asmo high-quality + Harri medium/low).
@@ -522,6 +533,7 @@ def is_piper_available() -> bool:
     """Quick check whether the piper-tts package is importable."""
     try:
         from piper import PiperVoice  # noqa: F401
+
         return True
     except Exception:
         return False
@@ -544,9 +556,9 @@ def ensure_piper_package() -> bool:
     _piper_install_tried = True
     print("[TTS] piper-tts not installed. Attempting automatic installation (local/offline TTS)...")
 
+    import shutil
     import subprocess
     import sys
-    import shutil
 
     def _try_install(cmd, label):
         """Run the install. On failure, re-execute once with output capture so the
@@ -587,7 +599,9 @@ def ensure_piper_package() -> bool:
                 return True
 
     # Fallback: python -m uv (if uv was pip-installed into venv)
-    if _try_install([sys.executable, "-m", "uv", "pip", "install", "piper-tts"], "python -m uv pip install"):
+    if _try_install(
+        [sys.executable, "-m", "uv", "pip", "install", "piper-tts"], "python -m uv pip install"
+    ):
         if is_piper_available():
             print("[TTS] Successfully installed piper-tts for fully offline voiceovers.")
             return True
@@ -609,7 +623,7 @@ def get_local_tts_status() -> dict:
             "ready": False,
             "provider": provider,
             "message": "Local offline TTS (Piper) selected but 'piper-tts' is not installed "
-                       "(auto-install also failed). Run: uv pip install piper-tts",
+            "(auto-install also failed). Run: uv pip install piper-tts",
             "fallback_used": False,
         }
 
@@ -648,6 +662,7 @@ def get_piper_voices_for_language(lang_code: str) -> list[tuple[str, str]]:
 # Google TTS Readiness Detection (for better UX in narrative exporter + UI)
 # =============================================================================
 
+
 def is_google_tts_available() -> bool:
     """
     Returns True if the google-cloud-texttospeech package is installed
@@ -671,6 +686,7 @@ def is_google_tts_available() -> bool:
     # Check for usable credentials without making a real TTS call.
     try:
         import google.auth
+
         credentials, _ = google.auth.default(
             scopes=["https://www.googleapis.com/auth/cloud-platform"]
         )
@@ -706,7 +722,7 @@ def get_google_tts_status() -> dict:
             "ready": False,
             "provider": "google",
             "message": "Google Cloud TTS selected but 'google-cloud-texttospeech' is not installed "
-                       "(auto-install also failed). Run: uv pip install google-cloud-texttospeech",
+            "(auto-install also failed). Run: uv pip install google-cloud-texttospeech",
             "fallback_used": False,
         }
 
@@ -733,12 +749,16 @@ def get_google_tts_status() -> dict:
         }
     else:
         if creds_path:
-            msg = (f"Google Cloud TTS selected but the credentials file "
-                   f"{Path(creds_path).name} is invalid or not authorized for Text-to-Speech. "
-                   "Check the file or re-select it in Settings.")
+            msg = (
+                f"Google Cloud TTS selected but the credentials file "
+                f"{Path(creds_path).name} is invalid or not authorized for Text-to-Speech. "
+                "Check the file or re-select it in Settings."
+            )
         else:
-            msg = ("Google Cloud TTS selected but credentials are not configured. "
-                   "Use the 'Log in with Google' button, or pick a service account JSON key file below.")
+            msg = (
+                "Google Cloud TTS selected but credentials are not configured. "
+                "Use the 'Log in with Google' button, or pick a service account JSON key file below."
+            )
         return {
             "ready": False,
             "provider": "google",
@@ -767,7 +787,7 @@ async def generate_narration_audio(
     *,
     language: str = DEFAULT_LANGUAGE,
     output_path: str | Path,
-    voice: Optional[str] = None,
+    voice: str | None = None,
 ) -> Path:
     """
     Generate narration audio using the currently selected TTS provider
@@ -797,6 +817,7 @@ async def generate_narration_audio(
             return _generate_with_piper(text, language, output_path, voice)
 
         import asyncio
+
         return await asyncio.to_thread(_do_local)
 
     elif provider == "google":
@@ -809,14 +830,16 @@ async def generate_narration_audio(
         except Exception as ex:
             raise RuntimeError(f"Google Cloud TTS failed: {ex}") from ex
     else:
-        raise RuntimeError(f"Unknown TTS provider: {provider}. Choose 'local' or 'google' in Settings.")
+        raise RuntimeError(
+            f"Unknown TTS provider: {provider}. Choose 'local' or 'google' in Settings."
+        )
 
 
 def _generate_with_piper(
     text: str,
     language: str,
     output_path: str | Path,
-    voice: Optional[str] = None,
+    voice: str | None = None,
 ) -> Path:
     """Fully offline Piper TTS generation.
     Downloads the model for the language on first use if needed.
@@ -838,7 +861,9 @@ def _generate_with_piper(
         # get_tts_voice now cleans, but double-defend for legacy direct calls or old data.
         cleaned_saved = clean_tts_voice(saved)
         # If the saved voice looks like a Google Cloud name while using local, ignore it.
-        if cleaned_saved and not cleaned_saved.startswith(("en_US", "fi_FI", "de_DE", "fr_FR", "es_ES", "sv_SE")):
+        if cleaned_saved and not cleaned_saved.startswith(
+            ("en_US", "fi_FI", "de_DE", "fr_FR", "es_ES", "sv_SE")
+        ):
             cleaned_saved = None
         voice_id = cleaned_saved or None
 
@@ -860,24 +885,32 @@ def _generate_with_piper(
 
         # Write native WAV using wave (mono, model's rate, 16-bit)
         import wave
+
         with wave.open(str(native_wav), "wb") as wav_file:
             voice_obj.synthesize_wav(text, wav_file)
 
         # Convert to 44100 Hz stereo WAV using ffmpeg (duplicate channels for stereo) -- same as all other VO files and Narration.wav
         ffmpeg = find_ffmpeg()
         cmd = [
-            str(ffmpeg), "-y",
-            "-i", str(native_wav),
-            "-ar", "44100",
-            "-ac", "2",
-            "-c:a", "pcm_s16le",
-            str(out_path)
+            str(ffmpeg),
+            "-y",
+            "-i",
+            str(native_wav),
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-c:a",
+            "pcm_s16le",
+            str(out_path),
         ]
         try:
             subprocess.run(cmd, check=True, capture_output=True)
         except subprocess.CalledProcessError as e:
             err = (e.stderr or b"").decode(errors="ignore")[:500]
-            raise RuntimeError(f"ffmpeg failed to convert Piper output to 44100Hz stereo WAV: {err}") from e
+            raise RuntimeError(
+                f"ffmpeg failed to convert Piper output to 44100Hz stereo WAV: {err}"
+            ) from e
 
     return out_path
 
@@ -886,7 +919,7 @@ async def _generate_with_edge_tts(
     text: str,
     language: str,
     output_path: str | Path,
-    voice: Optional[str],
+    voice: str | None,
 ) -> Path:
     """Original edge-tts implementation (free, zero config)."""
     import edge_tts
@@ -906,7 +939,7 @@ async def _generate_with_google_tts(
     text: str,
     language: str,
     output_path: str | Path,
-    voice: Optional[str],
+    voice: str | None,
 ) -> Path:
     """
     Google Cloud Text-to-Speech implementation.
@@ -934,7 +967,11 @@ async def _generate_with_google_tts(
         lang = clean_tts_language(language) or "en"
         voice_name = GOOGLE_LANGUAGE_TO_VOICE.get(lang, DEFAULT_GOOGLE_VOICE)
         # Extract language code from voice name (e.g. "en-US-Neural2-F" → "en-US")
-        lang_code = voice_name.split("-")[0] + "-" + voice_name.split("-")[1] if "-" in voice_name else "en-US"
+        lang_code = (
+            voice_name.split("-")[0] + "-" + voice_name.split("-")[1]
+            if "-" in voice_name
+            else "en-US"
+        )
 
     client = texttospeech.TextToSpeechClient()
 
@@ -959,18 +996,23 @@ async def _generate_with_google_tts(
     # Write as temp linear16 mono, then convert to 44100 stereo pcm WAV (exactly matching the Narration.wav format)
     # so ALL VO audio files (bridges and full Narration script) have the same format: 44100Hz stereo 16-bit PCM WAV
     # (no more "stereo mapped to 2 mono" difference)
-    native_wav = out_path.with_suffix('.tmp.linear16.wav')
+    native_wav = out_path.with_suffix(".tmp.linear16.wav")
     native_wav.write_bytes(response.audio_content)
 
-    final_out = out_path.with_suffix('.wav')
+    final_out = out_path.with_suffix(".wav")
     ffmpeg = find_ffmpeg()
     cmd = [
-        str(ffmpeg), "-y",
-        "-i", str(native_wav),
-        "-ar", "44100",
-        "-ac", "2",
-        "-c:a", "pcm_s16le",
-        str(final_out)
+        str(ffmpeg),
+        "-y",
+        "-i",
+        str(native_wav),
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-c:a",
+        "pcm_s16le",
+        str(final_out),
     ]
     try:
         subprocess.run(cmd, check=True, capture_output=True)
@@ -978,7 +1020,9 @@ async def _generate_with_google_tts(
         err = (e.stderr or b"").decode(errors="ignore")[:500]
         if native_wav.exists():
             native_wav.unlink(missing_ok=True)
-        raise RuntimeError(f"ffmpeg failed to convert Google TTS output to 44100Hz stereo WAV: {err}") from e
+        raise RuntimeError(
+            f"ffmpeg failed to convert Google TTS output to 44100Hz stereo WAV: {err}"
+        ) from e
 
     if native_wav.exists():
         native_wav.unlink(missing_ok=True)
@@ -991,7 +1035,7 @@ def generate_narration_audio_sync(
     *,
     language: str = DEFAULT_LANGUAGE,
     output_path: str | Path,
-    voice: Optional[str] = None,
+    voice: str | None = None,
 ) -> Path:
     """
     Synchronous wrapper around generate_narration_audio.
@@ -1014,6 +1058,7 @@ def generate_narration_audio_sync(
         # We are inside a running event loop (NiceGUI etc.).
         # Offload the async work to a fresh thread + new loop.
         import concurrent.futures
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(asyncio.run, coro)
             return future.result()

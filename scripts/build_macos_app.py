@@ -49,14 +49,17 @@ def main():
     ]
 
     cmd = [
-        sys.executable, "-m", "PyInstaller",
-        "--name", APP_NAME,
-        "--windowed",                    # no console window on macOS
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--name",
+        APP_NAME,
+        "--windowed",  # no console window on macOS
         "--onedir",
         "--clean",
         "--noconfirm",
-        "--strip",                       # smaller binary
-        "--noupx",                       # avoid upx issues on arm64
+        "--strip",  # smaller binary
+        "--noupx",  # avoid upx issues on arm64
     ]
 
     # Icon handling: prefer .icns, auto-generate from PNG if missing (macOS only)
@@ -127,6 +130,7 @@ def _generate_icns_from_png(png_path: Path, icns_path: Path) -> None:
     subprocess.check_call(["iconutil", "-c", "icns", str(iconset), "-o", str(icns_path)])
     # Cleanup
     import shutil
+
     shutil.rmtree(iconset.parent, ignore_errors=True)
 
 

@@ -11,19 +11,24 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()  # Load .env file once when settings module is first imported
 except ImportError:
-    load_dotenv = lambda: None  # type: ignore
+
+    def load_dotenv():
+        return None  # type: ignore
+
     # python-dotenv not installed — environment variables still work via os.getenv
 
 APP_NAME = "minicat"
 
 # Default catalog location per user request: always ~/CAT+TAG (username agnostic)
 DEFAULT_CATALOG_DIRECTORY = str(Path.home() / "CAT+TAG")
+
 
 def _get_config_dir() -> Path:
     """Return the user config directory for CAT+TAG."""
@@ -101,7 +106,10 @@ def get_effective_catalog() -> Path:
             return last
         # Folder does not exist: check for known legacy prefill paths that were never real.
         last_str = str(last)
-        if "VideoCatalogs" in last_str or str(Path.home() / "VideoCatalogs" / "CAT+TAG") in last_str:
+        if (
+            "VideoCatalogs" in last_str
+            or str(Path.home() / "VideoCatalogs" / "CAT+TAG") in last_str
+        ):
             default = get_default_catalog_directory()
             set_last_catalog(default)
             return default
@@ -116,6 +124,7 @@ def get_effective_catalog() -> Path:
 # ---------------------------------------------------------------------------
 # User Preferences
 # ---------------------------------------------------------------------------
+
 
 def get_preference(key: str, default: Any = None) -> Any:
     """Get a user preference with a default fallback."""
@@ -137,6 +146,7 @@ def set_preference(key: str, value: Any) -> None:
 # Inspector-specific UI settings
 # ---------------------------------------------------------------------------
 
+
 def get_inspector_width(default: int = 380) -> int:
     """Get persisted width for the resizable right inspector panel (px)."""
     width = get_preference("ui.inspector_width", default)
@@ -156,6 +166,7 @@ def set_inspector_width(width: int) -> None:
 # ---------------------------------------------------------------------------
 # AI Features (Gemini / OpenAI)
 # ---------------------------------------------------------------------------
+
 
 def get_gemini_api_key() -> str | None:
     """
@@ -285,7 +296,7 @@ def set_tts_default_language(lang: Any) -> None:
         set_preference("ai.tts_default_language", code)
 
 
-def clean_tts_voice(v: Any) -> Optional[str]:
+def clean_tts_voice(v: Any) -> str | None:
     """Sanitize voice values that may have been saved as (id, label) tuples/lists
     from ui.select or as "id (label)" strings. Always return a plain voice id string.
     """
@@ -310,7 +321,7 @@ def clean_tts_voice(v: Any) -> Optional[str]:
         return None
 
 
-def clean_tts_language(v: Any) -> Optional[str]:
+def clean_tts_language(v: Any) -> str | None:
     """Sanitize language values that may have been surfaced as (code, label) tuples/lists
     from ui.select (when options=list of (val, label)) or as "en (English)" strings.
     Always returns a plain lowercase language code (e.g. "en"), or None.
@@ -384,7 +395,8 @@ def set_tts_voice(voice: Any) -> None:
 # When set, we inject GOOGLE_APPLICATION_CREDENTIALS so google.auth picks it up.
 # ---------------------------------------------------------------------------
 
-def get_gcp_credentials_path() -> Optional[str]:
+
+def get_gcp_credentials_path() -> str | None:
     """Return a previously chosen Google Cloud service account key JSON path if it exists."""
     p = get_preference("ai.gcp_credentials_path", None)
     if p and isinstance(p, str) and os.path.isfile(p):
@@ -392,7 +404,7 @@ def get_gcp_credentials_path() -> Optional[str]:
     return None
 
 
-def set_gcp_credentials_path(path: Optional[str]) -> None:
+def set_gcp_credentials_path(path: str | None) -> None:
     """Persist path to a Google Cloud credentials JSON (or clear it)."""
     if path:
         abspath = os.path.abspath(path)
@@ -411,10 +423,6 @@ def set_gcp_credentials_path(path: Optional[str]) -> None:
         os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
 
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # Proxy Profiles (new 2026 set - exact ffmpeg recipes)
 # ---------------------------------------------------------------------------
@@ -424,7 +432,7 @@ DEFAULT_PROXY_PRESET = "Apple ProRes Proxy (Standard NLE Workflow)"
 PROXY_PRESETS = [
     "Apple ProRes Proxy (Standard NLE Workflow)",
     "Avid DNxHR LB (Windows/Avid Workflow)",
-    "H.264 \"Performance\" Proxy (720p)",
+    'H.264 "Performance" Proxy (720p)',
     "HEVC/H.265 (Space-Saving Proxy)",
     "MJPEG Draft (Low-CPU Legacy Proxy)",
 ]
@@ -542,6 +550,7 @@ def set_default_export_directory(path: str | Path) -> None:
 # Per-export subfolder creation (always new folder inside default library)
 # ---------------------------------------------------------------------------
 
+
 def _sanitize_folder_name(name: str) -> str:
     """Make a filesystem-safe folder name prefix from a title or suggestion."""
     return sanitize_for_filesystem(name, max_len=60)
@@ -551,9 +560,9 @@ def sanitize_for_filesystem(name: str, max_len: int = 80) -> str:
     """Return a safe name usable for folders and file stems (no / : * ? " < > | etc)."""
     if not name:
         return "Export"
-    s = re.sub(r'[\\/:*?"<>|]+', '_', name)
-    s = re.sub(r'\s+', '_', s)
-    s = re.sub(r'_+', '_', s).strip('_')
+    s = re.sub(r'[\\/:*?"<>|]+', "_", name)
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
     s = s[:max_len]
     return s or "Export"
 

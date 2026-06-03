@@ -48,6 +48,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+ignore = ["E501"]  # ignore line-too-long; many intentional long strings/prompts in AI code and tests
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

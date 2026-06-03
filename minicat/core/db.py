@@ -152,7 +152,7 @@ def get_connection(catalog_root: Path) -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(
         str(db_path),
         detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-        timeout=60.0,   # Increased from 30s
+        timeout=60.0,  # Increased from 30s
     )
     conn.row_factory = sqlite3.Row
 
@@ -305,7 +305,7 @@ def add_video(catalog_root: Path, video: Video) -> int:
                 video.operator,
                 video.lens,
                 video.notes,
-                '',  # tag_names (populated later via set_video_tags)
+                "",  # tag_names (populated later via set_video_tags)
                 str(video.thumbnail_path) if video.thumbnail_path else None,
                 str(video.storyboard_path) if video.storyboard_path else None,
                 str(video.camera_xml_path) if video.camera_xml_path else None,
@@ -331,9 +331,7 @@ def add_video(catalog_root: Path, video: Video) -> int:
 
 def get_video_by_path(catalog_root: Path, path: str | Path) -> Video | None:
     with get_connection(catalog_root) as conn:
-        row = conn.execute(
-            "SELECT * FROM videos WHERE path = ?", (str(path),)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM videos WHERE path = ?", (str(path),)).fetchone()
         if not row:
             return None
         tags = _get_tags_for_video(conn, row["id"])
@@ -347,8 +345,7 @@ def get_videos_by_ids(catalog_root: Path, ids: list[int]) -> list[Video]:
     with get_connection(catalog_root) as conn:
         placeholders = ",".join("?" * len(ids))
         rows = conn.execute(
-            f"SELECT * FROM videos WHERE id IN ({placeholders}) ORDER BY id",
-            ids
+            f"SELECT * FROM videos WHERE id IN ({placeholders}) ORDER BY id", ids
         ).fetchall()
         result = []
         for row in rows:
@@ -413,7 +410,7 @@ def update_video_fields(
         params.append(lens)
     if shoot_date is not None:
         sets.append("shoot_date = ?")
-        params.append(shoot_date.isoformat() if hasattr(shoot_date, 'isoformat') else shoot_date)
+        params.append(shoot_date.isoformat() if hasattr(shoot_date, "isoformat") else shoot_date)
     if notes is not None:
         sets.append("notes = ?")
         params.append(notes)
@@ -473,18 +470,24 @@ def update_video_fields(
         # Only allow setting fps if the clip currently has no positive fps (legacy backfill).
         try:
             with get_connection(catalog_root) as conn:
-                current = conn.execute("SELECT fps FROM videos WHERE id = ?", (video_id,)).fetchone()
+                current = conn.execute(
+                    "SELECT fps FROM videos WHERE id = ?", (video_id,)
+                ).fetchone()
                 current_fps = float(current[0]) if current and current[0] is not None else 0.0
             if current_fps > 0:
                 # Allow correction if the currently stored value is unrealistic (bad import-time probe)
                 # but the new one looks sane. This fixes cases like 150 fps on normal footage.
                 new_fps = float(fps)
                 if (current_fps > 120 or current_fps < 1) and (1 <= new_fps <= 120):
-                    print(f"[DB] Correcting unrealistic stored fps={current_fps} to {new_fps} for video {video_id}")
+                    print(
+                        f"[DB] Correcting unrealistic stored fps={current_fps} to {new_fps} for video {video_id}"
+                    )
                     sets.append("fps = ?")
                     params.append(new_fps)
                 else:
-                    print(f"[DB] Ignoring fps={fps} update for video {video_id}: framerate was already confirmed at import time and is immutable.")
+                    print(
+                        f"[DB] Ignoring fps={fps} update for video {video_id}: framerate was already confirmed at import time and is immutable."
+                    )
             else:
                 sets.append("fps = ?")
                 params.append(float(fps))
@@ -553,10 +556,7 @@ def rename_project(catalog_root: Path, old_name: str, new_name: str) -> int:
     if not new_name or new_name == old_name:
         return 0
     with get_connection(catalog_root) as conn:
-        cur = conn.execute(
-            "UPDATE videos SET project = ? WHERE project = ?",
-            (new_name, old_name)
-        )
+        cur = conn.execute("UPDATE videos SET project = ? WHERE project = ?", (new_name, old_name))
         conn.commit()
         return cur.rowcount
 
@@ -581,7 +581,9 @@ def delete_project(catalog_root: Path, name: str, also_delete_clips: bool = Fals
         # even if this is called directly (not via UI dialog which pre-cleans).
         try:
             videos = search_videos(catalog_root, SearchFilters(), limit=100000)
-            clips_to_cleanup = [(v.id, v.filename) for v in videos if getattr(v, "project", None) == name and v.id]
+            clips_to_cleanup = [
+                (v.id, v.filename) for v in videos if getattr(v, "project", None) == name and v.id
+            ]
         except Exception:
             clips_to_cleanup = []
 
@@ -589,6 +591,7 @@ def delete_project(catalog_root: Path, name: str, also_delete_clips: bool = Fals
         # Cleanup generated files for these clips (previews/boards, audio, transcripts, subtitles, proxies)
         try:
             from minicat.core.video import cleanup_all_generated_files_for_clip
+
             for cid, fname in clips_to_cleanup:
                 try:
                     cleanup_all_generated_files_for_clip(cid, catalog_root, original_filename=fname)
@@ -610,7 +613,10 @@ def delete_project(catalog_root: Path, name: str, also_delete_clips: bool = Fals
         if also_delete_clips:
             # Clean tag associations for the clips being deleted (the per-clip delete_video
             # does this, but bulk project delete bypasses it).
-            conn.execute("DELETE FROM video_tags WHERE video_id IN (SELECT id FROM videos WHERE project = ?)", (name,))
+            conn.execute(
+                "DELETE FROM video_tags WHERE video_id IN (SELECT id FROM videos WHERE project = ?)",
+                (name,),
+            )
             cur = conn.execute("DELETE FROM videos WHERE project = ?", (name,))
             # Ensure FTS is fully clean for the deleted clips (in addition to the per-row triggers).
             # This removes any stale clip information from the search index.
@@ -633,6 +639,7 @@ def delete_project(catalog_root: Path, name: str, also_delete_clips: bool = Fals
 # ---------------------------------------------------------------------------
 # Rich Project Management (new in v4)
 # ---------------------------------------------------------------------------
+
 
 def _row_to_project(row: sqlite3.Row, clip_count: int = 0, total_duration: float = 0.0) -> Project:
     data = dict(row)
@@ -681,7 +688,7 @@ def get_all_projects(catalog_root: Path) -> list[Project]:
         for row in rows:
             stats = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(duration), 0) FROM videos WHERE project = ?",
-                (row["name"],)
+                (row["name"],),
             ).fetchone()
             clip_count = stats[0] or 0
             total_duration = stats[1] or 0.0
@@ -695,7 +702,7 @@ def get_all_projects(catalog_root: Path) -> list[Project]:
                 WHERE cp.project = ?
                 ORDER BY c.name COLLATE NOCASE
                 """,
-                (proj.name,)
+                (proj.name,),
             ).fetchall()
             proj.clients = [r[0] for r in client_rows]
 
@@ -709,8 +716,7 @@ def get_project(catalog_root: Path, name: str) -> Project | None:
         if not row:
             return None
         stats = conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(duration), 0) FROM videos WHERE project = ?",
-            (name,)
+            "SELECT COUNT(*), COALESCE(SUM(duration), 0) FROM videos WHERE project = ?", (name,)
         ).fetchone()
         proj = _row_to_project(row, stats[0] or 0, stats[1] or 0.0)
 
@@ -722,7 +728,7 @@ def get_project(catalog_root: Path, name: str) -> Project | None:
             WHERE cp.project = ?
             ORDER BY c.name COLLATE NOCASE
             """,
-            (name,)
+            (name,),
         ).fetchall()
         proj.clients = [r[0] for r in client_rows]
         return proj
@@ -739,17 +745,12 @@ def get_project_with_stats(catalog_root: Path, name: str) -> Project:
     # Legacy project (only exists on video records)
     with get_connection(catalog_root) as conn:
         stats = conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(duration), 0) FROM videos WHERE project = ?",
-            (name,)
+            "SELECT COUNT(*), COALESCE(SUM(duration), 0) FROM videos WHERE project = ?", (name,)
         ).fetchone()
         clip_count = stats[0] or 0
         total_duration = stats[1] or 0.0
 
-    proj = Project(
-        name=name,
-        clip_count=clip_count,
-        total_duration=total_duration
-    )
+    proj = Project(name=name, clip_count=clip_count, total_duration=total_duration)
 
     # Load clients even for legacy projects
     with get_connection(catalog_root) as conn:
@@ -759,7 +760,7 @@ def get_project_with_stats(catalog_root: Path, name: str) -> Project:
             JOIN client_projects cp ON cp.client_id = c.id
             WHERE cp.project = ?
             """,
-            (name,)
+            (name,),
         ).fetchall()
         proj.clients = [r[0] for r in client_rows]
     return proj
@@ -789,10 +790,18 @@ def create_or_update_project(catalog_root: Path, project: Project) -> Project:
                     project.name,
                     project.start_date.isoformat() if project.start_date else None,
                     project.end_date.isoformat() if project.end_date else None,
-                    project.client, project.director, project.producer, project.editor,
-                    ops_json, project.location, project.status, project.color, project.notes,
-                    now, project.id
-                )
+                    project.client,
+                    project.director,
+                    project.producer,
+                    project.editor,
+                    ops_json,
+                    project.location,
+                    project.status,
+                    project.color,
+                    project.notes,
+                    now,
+                    project.id,
+                ),
             )
         else:
             cur = conn.execute(
@@ -806,10 +815,18 @@ def create_or_update_project(catalog_root: Path, project: Project) -> Project:
                     project.name,
                     project.start_date.isoformat() if project.start_date else None,
                     project.end_date.isoformat() if project.end_date else None,
-                    project.client, project.director, project.producer, project.editor,
-                    ops_json, project.location, project.status, project.color, project.notes,
-                    now, now
-                )
+                    project.client,
+                    project.director,
+                    project.producer,
+                    project.editor,
+                    ops_json,
+                    project.location,
+                    project.status,
+                    project.color,
+                    project.notes,
+                    now,
+                    now,
+                ),
             )
             project.id = cur.lastrowid
 
@@ -820,6 +837,7 @@ def create_or_update_project(catalog_root: Path, project: Project) -> Project:
 # ---------------------------------------------------------------------------
 # Clients (rich entities, many-to-many with projects)
 # ---------------------------------------------------------------------------
+
 
 def _row_to_client(row: sqlite3.Row, project_count: int = 0) -> Client:
     data = dict(row)
@@ -835,14 +853,11 @@ def _row_to_client(row: sqlite3.Row, project_count: int = 0) -> Client:
 
 def get_clients(catalog_root: Path) -> list[Client]:
     with get_connection(catalog_root) as conn:
-        rows = conn.execute(
-            "SELECT * FROM clients ORDER BY name COLLATE NOCASE"
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM clients ORDER BY name COLLATE NOCASE").fetchall()
         clients = []
         for row in rows:
             stats = conn.execute(
-                "SELECT COUNT(*) FROM client_projects WHERE client_id = ?",
-                (row["id"],)
+                "SELECT COUNT(*) FROM client_projects WHERE client_id = ?", (row["id"],)
             ).fetchone()
             clients.append(_row_to_client(row, stats[0] or 0))
         return clients
@@ -854,8 +869,7 @@ def get_client(catalog_root: Path, client_id: int) -> Client | None:
         if not row:
             return None
         stats = conn.execute(
-            "SELECT COUNT(*) FROM client_projects WHERE client_id = ?",
-            (client_id,)
+            "SELECT COUNT(*) FROM client_projects WHERE client_id = ?", (client_id,)
         ).fetchone()
         return _row_to_client(row, stats[0] or 0)
 
@@ -878,9 +892,17 @@ def create_or_update_client(catalog_root: Path, client: Client) -> Client:
                 WHERE id = ?
                 """,
                 (
-                    client.name, client.contact_person, client.email, client.phone,
-                    client.address, client.notes, client.color, client.logo_path, now, client.id
-                )
+                    client.name,
+                    client.contact_person,
+                    client.email,
+                    client.phone,
+                    client.address,
+                    client.notes,
+                    client.color,
+                    client.logo_path,
+                    now,
+                    client.id,
+                ),
             )
         else:
             cur = conn.execute(
@@ -891,9 +913,17 @@ def create_or_update_client(catalog_root: Path, client: Client) -> Client:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    client.name, client.contact_person, client.email, client.phone,
-                    client.address, client.notes, client.color, client.logo_path, now, now
-                )
+                    client.name,
+                    client.contact_person,
+                    client.email,
+                    client.phone,
+                    client.address,
+                    client.notes,
+                    client.color,
+                    client.logo_path,
+                    now,
+                    now,
+                ),
             )
             client.id = cur.lastrowid
 
@@ -911,7 +941,7 @@ def get_clients_for_project(catalog_root: Path, project: str) -> list[Client]:
             WHERE cp.project = ?
             ORDER BY c.name COLLATE NOCASE
             """,
-            (project,)
+            (project,),
         ).fetchall()
         return [_row_to_client(row) for row in rows]
 
@@ -923,7 +953,7 @@ def set_project_clients(catalog_root: Path, project: str, client_ids: list[int])
         for cid in client_ids:
             conn.execute(
                 "INSERT OR IGNORE INTO client_projects (client_id, project) VALUES (?, ?)",
-                (cid, project)
+                (cid, project),
             )
         conn.commit()
 
@@ -932,8 +962,7 @@ def get_projects_for_client(catalog_root: Path, client_id: int) -> list[str]:
     """Return project names belonging to this client."""
     with get_connection(catalog_root) as conn:
         rows = conn.execute(
-            "SELECT project FROM client_projects WHERE client_id = ?",
-            (client_id,)
+            "SELECT project FROM client_projects WHERE client_id = ?", (client_id,)
         ).fetchall()
         return [r[0] for r in rows]
 
@@ -1006,7 +1035,9 @@ def add_tag(catalog_root: Path, name: str) -> int:
                 if cur.lastrowid:
                     tag_id = cur.lastrowid
                 else:
-                    row = conn.execute("SELECT id FROM tags WHERE name = ?", (normalized,)).fetchone()
+                    row = conn.execute(
+                        "SELECT id FROM tags WHERE name = ?", (normalized,)
+                    ).fetchone()
                     tag_id = row["id"] if row else None
                 conn.commit()
                 if tag_id:
@@ -1014,6 +1045,7 @@ def add_tag(catalog_root: Path, name: str) -> int:
         except sqlite3.OperationalError as e:
             if "locked" in str(e).lower() or "busy" in str(e).lower():
                 import time
+
                 time.sleep(0.05 * (attempt + 1))
                 continue
             raise
@@ -1026,9 +1058,10 @@ def add_tag(catalog_root: Path, name: str) -> int:
             "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, ?)",
             (normalized, now),
         )
-        tag_id = cur.lastrowid or conn.execute(
-            "SELECT id FROM tags WHERE name = ?", (normalized,)
-        ).fetchone()["id"]
+        tag_id = (
+            cur.lastrowid
+            or conn.execute("SELECT id FROM tags WHERE name = ?", (normalized,)).fetchone()["id"]
+        )
         conn.commit()
         return tag_id
 
@@ -1053,8 +1086,7 @@ def set_video_tags(catalog_root: Path, video_id: int, tag_names: list[str]) -> N
         tag_ids = []
         for name in normalized_names:
             cur = conn.execute(
-                "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, ?)",
-                (name, now)
+                "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, ?)", (name, now)
             )
             if cur.lastrowid:
                 tag_ids.append(cur.lastrowid)
@@ -1249,7 +1281,7 @@ def get_most_used_tags(catalog_root: Path, limit: int = 20) -> list[tuple[str, i
             ORDER BY cnt DESC, t.name ASC
             LIMIT ?
             """,
-            (limit,)
+            (limit,),
         ).fetchall()
         return [(r["name"], int(r["cnt"])) for r in rows]
 

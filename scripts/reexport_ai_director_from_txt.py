@@ -33,6 +33,7 @@ The script will:
 
 This lets you see exactly when/why problems appear as you add cameras.
 """
+
 import argparse
 import difflib
 import json
@@ -48,12 +49,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from minicat.ai.multi_xmeml_exporter import (
-    prepare_director_sources,
+from minicat.ai.multi_xmeml_exporter import (  # noqa: E402
     _build_mixed_sources_xmeml,
+    prepare_director_sources,
 )
-from minicat.core.settings import get_gemini_api_key
-from minicat.ai.transcriber import transcribe_audio_with_timestamps
+from minicat.ai.transcriber import transcribe_audio_with_timestamps  # noqa: E402
+from minicat.core.settings import get_gemini_api_key  # noqa: E402
 
 
 def parse_time_to_seconds(tstr: str) -> float:
@@ -93,7 +94,7 @@ def parse_txt_clips(txt_path: Path):
     )
     headers = list(header_re.finditer(content))
     for i, m in enumerate(headers):
-        n = int(m.group(1))
+        _ = int(m.group(1))
         time_str = m.group(2)
         dur_s = float(m.group(3))
         cl = m.group(4)
@@ -191,14 +192,19 @@ def get_transcript_segments(video_path: Path, language: str | None = None):
             return None
         api_key = get_gemini_api_key()
         if not api_key:
-            print("[re-export] No Gemini API key found (check .env or stored prefs). Skipping repair.")
+            print(
+                "[re-export] No Gemini API key found (check .env or stored prefs). Skipping repair."
+            )
             return None
         try:
             # ALWAYS confirm framerate of the video file before calling the transcriber.
             from minicat.core.video import confirm_video_framerate, extract_metadata
+
             fps = confirm_video_framerate(video_path)
             total_duration = extract_metadata(video_path).get("duration")
-            result = transcribe_audio_with_timestamps(audio, api_key, language=language, fps=fps, total_duration=total_duration)
+            result = transcribe_audio_with_timestamps(
+                audio, api_key, language=language, fps=fps, total_duration=total_duration
+            )
             segs = result.get("segments", [])
             # Sanitize: drop inverted or insanely high timestamps (Gemini sometimes returns garbage like 1004s on short audio)
             sane = []
@@ -258,10 +264,17 @@ def find_best_segment_for_text(text: str, segments: list[dict]) -> dict | None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Re-export AI Director XMEML from TXT script + mapping XML.")
-    parser.add_argument("--txt", required=True, type=Path, help="Path to the MultiClip_*.txt script")
+    parser = argparse.ArgumentParser(
+        description="Re-export AI Director XMEML from TXT script + mapping XML."
+    )
     parser.add_argument(
-        "--mapping-xml", required=True, type=Path, help="One of the app's original AI_Multi_*.xml (for C→file mapping)"
+        "--txt", required=True, type=Path, help="Path to the MultiClip_*.txt script"
+    )
+    parser.add_argument(
+        "--mapping-xml",
+        required=True,
+        type=Path,
+        help="One of the app's original AI_Multi_*.xml (for C→file mapping)",
     )
     parser.add_argument(
         "--output",
@@ -322,11 +335,16 @@ def main():
                 best = find_best_segment_for_text(item["text"], segs)
                 if best:
                     real_start = round(best["start"], 2)
-                    intended_dur = item.get("dur") or max(0.5, item.get("source_out", real_start + 1) - item.get("source_in", real_start))
+                    intended_dur = item.get("dur") or max(
+                        0.5,
+                        item.get("source_out", real_start + 1) - item.get("source_in", real_start),
+                    )
                     item["source_in"] = real_start
                     item["source_out"] = round(real_start + max(0.5, intended_dur), 2)
                     repaired += 1
-            print(f"  {cl}: repaired {repaired}/{len(items)} items with real transcript times (preserving intended beat durs).")
+            print(
+                f"  {cl}: repaired {repaired}/{len(items)} items with real transcript times (preserving intended beat durs)."
+            )
         print("--- Repair pass complete ---\n")
 
     # Build the data the exporter expects
@@ -385,9 +403,15 @@ def main():
     out_path.write_text(pretty_xml, encoding="utf-8")
     print(f"\nWrote {out_path}")
     print("Look at the [XMEML] lines above for the per-camera DIRECT vs PACK decisions.")
-    print("Compare the emitted in/out values against the [times] in the original TXT for each numbered item.")
-    print("In Premiere: import the XML, relink the sources, and check that each story beat plays the text")
-    print("that the script lists for that position (and that it comes from the correct physical camera file).")
+    print(
+        "Compare the emitted in/out values against the [times] in the original TXT for each numbered item."
+    )
+    print(
+        "In Premiere: import the XML, relink the sources, and check that each story beat plays the text"
+    )
+    print(
+        "that the script lists for that position (and that it comes from the correct physical camera file)."
+    )
 
 
 if __name__ == "__main__":

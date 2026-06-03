@@ -35,8 +35,12 @@ def version() -> None:
 @app.command()
 def create(
     catalog_path: Path = typer.Argument(
-        ..., exists=False, file_okay=False, dir_okay=True, resolve_path=True,
-        help="Path to new catalog folder (will be created)."
+        ...,
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+        help="Path to new catalog folder (will be created).",
     ),
 ) -> None:
     """Create a new CAT+TAG catalog (initializes DB + preview folders)."""
@@ -56,15 +60,19 @@ def open(  # noqa: A001
         exists=False,
         file_okay=True,
         dir_okay=True,
-        help="Optional path to a catalog folder. Or pass a saved AIStory_*.json directly to open it for rendering narrations (TTS voiceovers) + XML export."
+        help="Optional path to a catalog folder. Or pass a saved AIStory_*.json directly to open it for rendering narrations (TTS voiceovers) + XML export.",
     ),
     native: bool = typer.Option(
-        True, "--native/--browser", "-n/-b",
-        help="Launch as native desktop window (recommended) or in browser."
+        True,
+        "--native/--browser",
+        "-n/-b",
+        help="Launch as native desktop window (recommended) or in browser.",
     ),
     new_workspace: bool = typer.Option(
-        False, "--new", "-N",
-        help="Launch the experimental new clean three-column workspace (v1 attempt)."
+        False,
+        "--new",
+        "-N",
+        help="Launch the experimental new clean three-column workspace (v1 attempt).",
     ),
 ) -> None:
     """
@@ -88,6 +96,7 @@ def open(  # noqa: A001
 
         if new_workspace:
             import os
+
             os.environ["CAT_TAG_USE_NEW_WORKSPACE"] = "1"
             console.print("[bold cyan]Launching experimental new clean workspace (v1)[/]")
 
@@ -95,18 +104,26 @@ def open(  # noqa: A001
             p = Path(catalog_or_story)
             if p.is_file() and p.suffix.lower() == ".json":
                 # Direct story load: user wants to render narrations & make XML from this saved AI project
-                console.print(f"[cyan]Launching CAT+TAG desktop app to load story for narration render + XML[/] → {p}")
+                console.print(
+                    f"[cyan]Launching CAT+TAG desktop app to load story for narration render + XML[/] → {p}"
+                )
                 import os
+
                 os.environ["CAT_TAG_INITIAL_STORY"] = str(p)
-                launch_desktop(None, title="CAT+TAG")  # will use last catalog (or wizard); story auto-loads after
+                launch_desktop(
+                    None, title="CAT+TAG"
+                )  # will use last catalog (or wizard); story auto-loads after
             else:
                 console.print(f"[cyan]Launching CAT+TAG desktop app[/] → {catalog_or_story}")
                 launch_desktop(str(catalog_or_story), title="CAT+TAG")
         else:
-            console.print("[cyan]Launching CAT+TAG desktop app[/] (will show catalog wizard if needed)")
-            launch_desktop(None, title="CAT+TAG")   # triggers first-launch setup screen
+            console.print(
+                "[cyan]Launching CAT+TAG desktop app[/] (will show catalog wizard if needed)"
+            )
+            launch_desktop(None, title="CAT+TAG")  # triggers first-launch setup screen
     else:
         from minicat.ui.app import run_web
+
         run_web(str(catalog_or_story) if catalog_or_story else None)
 
 
@@ -114,13 +131,19 @@ def open(  # noqa: A001
 def add(
     video_path: Path = typer.Argument(..., exists=True, dir_okay=False),
     catalog: Path = typer.Option(
-        ..., "--catalog", "-c", exists=True, file_okay=False,
-        help="Path to your CAT+TAG catalog folder"
+        ...,
+        "--catalog",
+        "-c",
+        exists=True,
+        file_okay=False,
+        help="Path to your CAT+TAG catalog folder",
     ),
     project: str | None = typer.Option(None, "--project", "-p"),
     location: str | None = typer.Option(None, "--location", "-l"),
     camera: str | None = typer.Option(None, "--camera", "-cam"),
-    shoot_date_str: str | None = typer.Option(None, "--date", "-d", help="Shoot date in YYYY-MM-DD format"),
+    shoot_date_str: str | None = typer.Option(
+        None, "--date", "-d", help="Shoot date in YYYY-MM-DD format"
+    ),
     tags: list[str] = typer.Option([], "--tag", "-t", help="Can be repeated"),
 ) -> None:
     """Add a single video with full structured metadata (project, location, camera, date)."""
@@ -128,9 +151,13 @@ def add(
     meta = video.extract_metadata(video_path)
     fps = meta.get("fps")
     if fps and float(fps) > 0:
-        console.print(f"[Import] Framerate confirmed at import: {fps} fps (probed live from {video_path.name}; will be immutable)")
+        console.print(
+            f"[Import] Framerate confirmed at import: {fps} fps (probed live from {video_path.name}; will be immutable)"
+        )
     else:
-        console.print(f"[Import] WARNING: could not confirm framerate for {video_path.name} (will default later)")
+        console.print(
+            f"[Import] WARNING: could not confirm framerate for {video_path.name} (will default later)"
+        )
 
     tc_start = meta.get("tc_start")
     if tc_start:
@@ -141,7 +168,9 @@ def add(
         try:
             shoot_date = date.fromisoformat(shoot_date_str)
         except ValueError:
-            console.print(f"[red]Invalid date format for --date: {shoot_date_str}. Use YYYY-MM-DD.[/]")
+            console.print(
+                f"[red]Invalid date format for --date: {shoot_date_str}. Use YYYY-MM-DD.[/]"
+            )
             raise typer.Exit(1)
 
     v = Video(
@@ -173,22 +202,55 @@ def add(
     # Automatic tags (resolution for video, "audio" for audio files)
     is_audio = _is_audio_file(video_path)
     auto_tags = video.get_auto_import_tags(meta, is_audio=is_audio)
-    final_tags = list(dict.fromkeys((tags or []) + auto_tags))  # user tags first, then auto, deduped
+    final_tags = list(
+        dict.fromkeys((tags or []) + auto_tags)
+    )  # user tags first, then auto, deduped
     if final_tags:
         db.set_video_tags(root, vid, final_tags)
 
     console.print(f"[green]✓[/] Added [bold]{video_path.name}[/] (id={vid})")
     if project or camera or location:
-        console.print(f"   Labels: project={project}  camera={camera or meta.get('camera')}  location={location}")
-    console.print(f"   Duration: {v.duration:.1f}s  Resolution: {v.width}x{v.height}" if v.duration else "")
+        console.print(
+            f"   Labels: project={project}  camera={camera or meta.get('camera')}  location={location}"
+        )
+    console.print(
+        f"   Duration: {v.duration:.1f}s  Resolution: {v.width}x{v.height}" if v.duration else ""
+    )
 
 
 # Broad list for professional and consumer footage (we rely on ffmpeg for actual decoding)
 VIDEO_EXTENSIONS = {
-    ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mts", ".m2ts", ".3gp",
-    ".mxf", ".braw", ".r3d", ".dnxhd", ".dnxhr", ".exr", ".dpx", ".ari",
-    ".vob", ".mpg", ".mpeg", ".ts", ".m2t", ".m2ts", ".m2v",
-    ".flv", ".f4v", ".asf", ".wmv", ".ogv", ".ogg", ".qt",
+    ".mp4",
+    ".mov",
+    ".m4v",
+    ".mkv",
+    ".avi",
+    ".webm",
+    ".mts",
+    ".m2ts",
+    ".3gp",
+    ".mxf",
+    ".braw",
+    ".r3d",
+    ".dnxhd",
+    ".dnxhr",
+    ".exr",
+    ".dpx",
+    ".ari",
+    ".vob",
+    ".mpg",
+    ".mpeg",
+    ".ts",
+    ".m2t",
+    ".m2ts",
+    ".m2v",
+    ".flv",
+    ".f4v",
+    ".asf",
+    ".wmv",
+    ".ogv",
+    ".ogg",
+    ".qt",
 }
 
 
@@ -198,9 +260,23 @@ def _is_video_file(p: Path) -> bool:
 
 # Audio formats supported for direct import into the Library (use generic waveform icon)
 AUDIO_EXTENSIONS = {
-    ".wav", ".wave", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".oga",
-    ".aiff", ".aif", ".aifc", ".wma", ".opus", ".amr", ".ac3",
-    ".mid", ".midi",
+    ".wav",
+    ".wave",
+    ".mp3",
+    ".m4a",
+    ".aac",
+    ".flac",
+    ".ogg",
+    ".oga",
+    ".aiff",
+    ".aif",
+    ".aifc",
+    ".wma",
+    ".opus",
+    ".amr",
+    ".ac3",
+    ".mid",
+    ".midi",
 }
 
 
@@ -220,7 +296,9 @@ def scan(
     camera: str | None = typer.Option(None, "--camera", "-cam"),
     location: str | None = typer.Option(None, "--location", "-l"),
     recursive: bool = typer.Option(True, "--recursive/--no-recursive", "-r"),
-    limit: int | None = typer.Option(None, "--limit", help="Stop after N files (useful while testing)"),
+    limit: int | None = typer.Option(
+        None, "--limit", help="Stop after N files (useful while testing)"
+    ),
 ) -> None:
     """
     Recursively find video and audio files in a folder (your Premiere project folders,
@@ -253,7 +331,9 @@ def scan(
             meta = video.extract_metadata(f)
             fps = meta.get("fps")
             if fps and float(fps) > 0:
-                console.print(f"[Import] Framerate confirmed at import: {fps} fps (probed live from {f.name}; will be immutable)")
+                console.print(
+                    f"[Import] Framerate confirmed at import: {fps} fps (probed live from {f.name}; will be immutable)"
+                )
             else:
                 console.print(f"[Import] WARNING: could not confirm framerate for {f.name}")
 
@@ -410,13 +490,23 @@ def tags(
 # ---------------------------------------------------------------------------
 @app.command("test-ai-journalist-audio", hidden=True)
 def test_ai_journalist_audio(
-    audio_path: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to the audio file (wav, mp3, m4a, etc.)"),
-    max_duration: float = typer.Option(180.0, "--max-duration", "-d", help="Target maximum duration per version in seconds"),
-    min_duration: float = typer.Option(30.0, "--min-duration", help="Target minimum duration per version in seconds"),
+    audio_path: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="Path to the audio file (wav, mp3, m4a, etc.)"
+    ),
+    max_duration: float = typer.Option(
+        180.0, "--max-duration", "-d", help="Target maximum duration per version in seconds"
+    ),
+    min_duration: float = typer.Option(
+        30.0, "--min-duration", help="Target minimum duration per version in seconds"
+    ),
     purpose: str = typer.Option("News Package", "--purpose", "-p", help="Purpose of the cut"),
-    tone: str = typer.Option("rewrite", "--tone", "-t", help="Tone (rewrite recommended for testing)"),
+    tone: str = typer.Option(
+        "rewrite", "--tone", "-t", help="Tone (rewrite recommended for testing)"
+    ),
     versions: int = typer.Option(2, "--versions", "-n", help="Number of versions to generate"),
-    output: Path | None = typer.Option(None, "--output", "-o", help="Optional path to save full JSON results"),
+    output: Path | None = typer.Option(
+        None, "--output", "-o", help="Optional path to save full JSON results"
+    ),
 ) -> None:
     """
     [EXPERIMENTAL] Test the new audio-based AI Journalist cutter.
@@ -433,7 +523,7 @@ def test_ai_journalist_audio(
         console.print("Make sure google-genai is installed: [cyan]uv pip install google-genai[/]")
         raise typer.Exit(1) from e
 
-    console.print(f"[bold cyan]Testing AI Journalist from AUDIO[/]")
+    console.print("[bold cyan]Testing AI Journalist from AUDIO[/]")
     console.print(f"Audio: [bold]{audio_path}[/]")
     console.print(f"Max duration: {max_duration}s  |  Tone: {tone}  |  Versions: {versions}\n")
 
@@ -478,6 +568,7 @@ def test_ai_journalist_audio(
 
     if output:
         import json
+
         output.write_text(json.dumps(results, indent=2, ensure_ascii=False))
         console.print(f"[green]Full results saved to[/] {output}")
 
@@ -490,10 +581,18 @@ def test_ai_journalist_audio(
 # ---------------------------------------------------------------------------
 @app.command("test-narrative-exporter", hidden=True)
 def test_narrative_exporter_cli(
-    with_voiceover: bool = typer.Option(True, "--with-voiceover/--no-voiceover", help="Generate actual voiceover MP3s"),
-    as_titles: bool = typer.Option(False, "--as-titles", help="Export narration bridges as visible text titles instead of audio"),
+    with_voiceover: bool = typer.Option(
+        True, "--with-voiceover/--no-voiceover", help="Generate actual voiceover MP3s"
+    ),
+    as_titles: bool = typer.Option(
+        False,
+        "--as-titles",
+        help="Export narration bridges as visible text titles instead of audio",
+    ),
     language: str = typer.Option("en", "--language", "-l", help="Voiceover language code"),
-    output_dir: Path | None = typer.Option(None, "--output-dir", "-o", help="Where to write the XML (defaults to standard export dir)"),
+    output_dir: Path | None = typer.Option(
+        None, "--output-dir", "-o", help="Where to write the XML (defaults to standard export dir)"
+    ),
 ) -> None:
     """
     Test Exporter #3 (Multi-source AI Director with narration + optional voiceover).
@@ -509,7 +608,9 @@ def test_narrative_exporter_cli(
         raise typer.Exit(1)
 
     console.print("[bold cyan]Testing Exporter #3 — Narrative + Voiceover[/]")
-    console.print(f"Voiceover: {with_voiceover}  |  Titles mode: {as_titles}  |  Language: {language}")
+    console.print(
+        f"Voiceover: {with_voiceover}  |  Titles mode: {as_titles}  |  Language: {language}"
+    )
 
     status = get_tts_status()
     console.print(f"TTS status: {status['message']}")
@@ -521,14 +622,39 @@ def test_narrative_exporter_cli(
         "total_duration": 95.0,
         "narrative_summary": "Test export via CLI for exporter #3 validation.",
         "narrative_elements": [
-            {"type": "clip", "source_label": "C1", "source_in": 10.0, "source_out": 25.0, "text": "We started with high hopes."},
-            {"type": "narration", "text": "This opening sets the optimistic tone before reality hit."},
-            {"type": "clip", "source_label": "C2", "source_in": 40.0, "source_out": 55.0, "text": "The budget constraints forced difficult choices."},
+            {
+                "type": "clip",
+                "source_label": "C1",
+                "source_in": 10.0,
+                "source_out": 25.0,
+                "text": "We started with high hopes.",
+            },
+            {
+                "type": "narration",
+                "text": "This opening sets the optimistic tone before reality hit.",
+            },
+            {
+                "type": "clip",
+                "source_label": "C2",
+                "source_in": 40.0,
+                "source_out": 55.0,
+                "text": "The budget constraints forced difficult choices.",
+            },
             {"type": "narration", "text": "The official view was presented as unavoidable."},
         ],
         "selected_segments": [
-            {"source_label": "C1", "source_in": 10.0, "source_out": 25.0, "text": "We started with high hopes."},
-            {"source_label": "C2", "source_in": 40.0, "source_out": 55.0, "text": "The budget constraints forced difficult choices."},
+            {
+                "source_label": "C1",
+                "source_in": 10.0,
+                "source_out": 25.0,
+                "text": "We started with high hopes.",
+            },
+            {
+                "source_label": "C2",
+                "source_in": 40.0,
+                "source_out": 55.0,
+                "text": "The budget constraints forced difficult choices.",
+            },
         ],
         "narration_language": language,
     }
@@ -562,7 +688,9 @@ def compare_ai_journalist_audio(
     purpose: str = typer.Option("News Package", "--purpose", "-p"),
     tone: str = typer.Option("rewrite", "--tone", "-t"),
     versions: int = typer.Option(2, "--versions", "-n"),
-    output: Path | None = typer.Option(None, "--output", "-o", help="Save full comparison JSON here"),
+    output: Path | None = typer.Option(
+        None, "--output", "-o", help="Save full comparison JSON here"
+    ),
 ) -> None:
     """
     [EXPERIMENTAL] Compare transcript-based vs audio-based AI Journalist on the same file.
@@ -571,19 +699,21 @@ def compare_ai_journalist_audio(
     to Gemini produces better narrative cuts than using the transcript.
     """
     try:
-        from minicat.ai.transcriber import transcribe_audio_with_timestamps
         from minicat.ai.journalist_cutter import (
             generate_journalist_cuts,
             generate_journalist_cuts_from_audio,
         )
+        from minicat.ai.transcriber import transcribe_audio_with_timestamps
     except ImportError as e:
         console.print("[red]Missing dependencies for comparison.[/]")
         console.print("Make sure google-genai is installed.")
         raise typer.Exit(1) from e
 
-    console.print(f"[bold magenta]Comparing AI Journalist methods[/]")
+    console.print("[bold magenta]Comparing AI Journalist methods[/]")
     console.print(f"File: [bold]{audio_path.name}[/]")
-    console.print(f"Min: {min_duration}s | Max: {max_duration}s | Tone: {tone} | Versions: {versions}\n")
+    console.print(
+        f"Min: {min_duration}s | Max: {max_duration}s | Tone: {tone} | Versions: {versions}\n"
+    )
 
     # Step 1: Transcribe (needed for the text-based path)
     console.print("[cyan]Step 1/3:[/] Transcribing audio for text-based cutter...")
@@ -592,7 +722,9 @@ def compare_ai_journalist_audio(
         # If a video file is provided or can be inferred next to the audio, probe it.
         fps = None
         from pathlib import Path
+
         from minicat.core.video import confirm_video_framerate, extract_metadata
+
         p = Path(audio_path)
         # Try sibling video with same stem
         for ext in (".MP4", ".mp4", ".MOV", ".mov", ".mxf"):
@@ -608,6 +740,7 @@ def compare_ai_journalist_audio(
             except Exception:
                 fps = 25.0
         from minicat.core.settings import get_gemini_api_key
+
         api_key = get_gemini_api_key()
         if not api_key:
             console.print("[red]No Gemini API key configured. Cannot transcribe.[/]")
@@ -615,13 +748,16 @@ def compare_ai_journalist_audio(
         total_duration = None
         try:
             from minicat.core.video import extract_metadata
-            if 'candidate' in locals() and candidate and candidate.exists():
+
+            if "candidate" in locals() and candidate and candidate.exists():
                 total_duration = extract_metadata(candidate).get("duration")
             elif p.suffix.lower() in (".mp4", ".mov", ".mxf") and p.exists():
                 total_duration = extract_metadata(audio_path).get("duration")
         except Exception:
             pass
-        segments = transcribe_audio_with_timestamps(str(audio_path), api_key, fps=fps, total_duration=total_duration)
+        segments = transcribe_audio_with_timestamps(
+            str(audio_path), api_key, fps=fps, total_duration=total_duration
+        )
         console.print(f"  → Got {len(segments)} timed segments\n")
     except Exception as ex:
         console.print(f"[red]Transcription failed:[/] {ex}")
@@ -650,7 +786,9 @@ def compare_ai_journalist_audio(
         text_versions = []
 
     # Step 3: Run audio-based cutter
-    console.print("[cyan]Step 3/3:[/] Running new audio-based AI Journalist (listening to raw audio)...")
+    console.print(
+        "[cyan]Step 3/3:[/] Running new audio-based AI Journalist (listening to raw audio)..."
+    )
     try:
         audio_versions = generate_journalist_cuts_from_audio(
             audio_path=str(audio_path),
@@ -693,10 +831,13 @@ def compare_ai_journalist_audio(
             t_dur = text_versions[i].get("total_duration", 0)
             a_dur = audio_versions[i].get("total_duration", 0)
             diff = a_dur - t_dur
-            console.print(f"  Version {chr(65+i)}: Transcript {t_dur:.1f}s vs Audio {a_dur:.1f}s  (diff: {diff:+.1f}s)")
+            console.print(
+                f"  Version {chr(65 + i)}: Transcript {t_dur:.1f}s vs Audio {a_dur:.1f}s  (diff: {diff:+.1f}s)"
+            )
 
     if output:
         import json
+
         comparison = {
             "audio_file": str(audio_path),
             "max_duration": max_duration,
@@ -711,12 +852,25 @@ def compare_ai_journalist_audio(
     console.print("\n[dim]Temporary comparison command. Remove when testing is complete.[/]")
 
 
-@app.command("txt-to-srt", help="Convert a per-clip transcription .txt (00000X_fi.txt or MN-..._fi.txt) to a source-style .srt (media-head timings, with real TC note in header). Useful for round-tripping after editing the human .txt.")
+@app.command(
+    "txt-to-srt",
+    help="Convert a per-clip transcription .txt (00000X_fi.txt or MN-..._fi.txt) to a source-style .srt (media-head timings, with real TC note in header). Useful for round-tripping after editing the human .txt.",
+)
 def txt_to_srt(
-    txt: Path = typer.Argument(..., exists=True, dir_okay=False, help="The _fi.txt (or _en.txt etc) transcription file"),
-    output: Path | None = typer.Option(None, "--output", "-o", help="Where to write the .srt (default: same dir, same stem .srt)"),
-    fps: float = typer.Option(25.0, "--fps", help="Source fps for quantization (usually from the clip)"),
-    base_timecode: str | None = typer.Option(None, "--base-tc", help="Real embedded start timecode of the clip, e.g. 11:43:09:01 (for the header comment)"),
+    txt: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="The _fi.txt (or _en.txt etc) transcription file"
+    ),
+    output: Path | None = typer.Option(
+        None, "--output", "-o", help="Where to write the .srt (default: same dir, same stem .srt)"
+    ),
+    fps: float = typer.Option(
+        25.0, "--fps", help="Source fps for quantization (usually from the clip)"
+    ),
+    base_timecode: str | None = typer.Option(
+        None,
+        "--base-tc",
+        help="Real embedded start timecode of the clip, e.g. 11:43:09:01 (for the header comment)",
+    ),
 ) -> None:
     """Turn an edited or external per-clip transcript TXT into a usable source .srt."""
     try:
@@ -746,7 +900,9 @@ def txt_to_srt(
         output = txt.with_suffix(".srt")
     output.write_text(srt_text, encoding="utf-8")
     console.print(f"[green]Wrote {len(segs)} utterances as source .srt[/] → {output}")
-    console.print(f"[dim]Header includes real TC note if --base-tc was given. Timings are media-head relative for sync.[/]")
+    console.print(
+        "[dim]Header includes real TC note if --base-tc was given. Timings are media-head relative for sync.[/]"
+    )
 
 
 @app.callback(invoke_without_command=True)
@@ -755,10 +911,12 @@ def main(ctx: typer.Context) -> None:
         # Bare invocation → launch the regular (current stable) desktop app
         try:
             from minicat.ui.desktop import launch_desktop
+
             console.print("[cyan]Starting CAT+TAG desktop app...[/]")
             launch_desktop(None, title="CAT+TAG")
         except Exception as exc:
             import traceback
+
             console.print("[bold red]Failed to launch desktop app[/]")
             console.print(f"[red]Error:[/] {exc}")
             traceback.print_exc()

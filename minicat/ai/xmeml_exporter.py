@@ -83,8 +83,10 @@ def get_media_start_offset_and_duration(file_path: str | Path) -> tuple[float, f
     file_path = str(file_path)
     cmd = [
         "ffprobe",
-        "-v", "quiet",
-        "-print_format", "json",
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
         "-show_format",
         "-show_streams",
         file_path,
@@ -158,8 +160,10 @@ def _get_source_audio_info(file_path: str | Path) -> dict[str, Any]:
     file_path = str(file_path)
     cmd = [
         "ffprobe",
-        "-v", "quiet",
-        "-print_format", "json",
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
         "-show_streams",
         file_path,
     ]
@@ -213,9 +217,12 @@ def get_video_timebase(file_path: str | Path) -> int:
     file_path = str(file_path)
     cmd = [
         "ffprobe",
-        "-v", "quiet",
-        "-print_format", "json",
-        "-select_streams", "v:0",
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-select_streams",
+        "v:0",
         "-show_streams",
         file_path,
     ]
@@ -247,7 +254,9 @@ def get_video_timebase(file_path: str | Path) -> int:
                                 return 60
                             tb = int(round(fps))
                             if tb > 120 or tb < 1:
-                                print(f"[XMEML] Warning: unrealistic timebase {tb} probed from {file_path}, using 25 instead")
+                                print(
+                                    f"[XMEML] Warning: unrealistic timebase {tb} probed from {file_path}, using 25 instead"
+                                )
                                 return 25
                             return tb
                     except Exception:
@@ -256,7 +265,9 @@ def get_video_timebase(file_path: str | Path) -> int:
                     try:
                         tb = int(float(rate))
                         if tb > 120 or tb < 1:
-                            print(f"[XMEML] Warning: unrealistic timebase {tb} probed from {file_path}, using 25 instead")
+                            print(
+                                f"[XMEML] Warning: unrealistic timebase {tb} probed from {file_path}, using 25 instead"
+                            )
                             return 25
                         return tb
                     except Exception:
@@ -365,8 +376,10 @@ def generate_xmeml(
             audio_channels = audio_info["channels"]
         if audio_sample_rate is None:
             audio_sample_rate = audio_info["sample_rate"]
-        print(f"[XMEML] Detected audio from source: {audio_channels}ch @ {audio_sample_rate}Hz "
-              f"(layout: {audio_info.get('channel_layout')}, codec: {audio_info.get('codec')})")
+        print(
+            f"[XMEML] Detected audio from source: {audio_channels}ch @ {audio_sample_rate}Hz "
+            f"(layout: {audio_info.get('channel_layout')}, codec: {audio_info.get('codec')})"
+        )
     else:
         print(f"[XMEML] Using caller-supplied audio: {audio_channels}ch @ {audio_sample_rate}Hz")
 
@@ -375,8 +388,15 @@ def generate_xmeml(
     par = "square"
     try:
         vcmd = [
-            "ffprobe", "-v", "quiet", "-print_format", "json",
-            "-show_streams", "-select_streams", "v:0", str(src_path)
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-select_streams",
+            "v:0",
+            str(src_path),
         ]
         vres = subprocess.run(vcmd, capture_output=True, text=True, timeout=10, check=True)
         vdata = json.loads(vres.stdout or "{}")
@@ -460,9 +480,9 @@ def generate_xmeml(
             MZ_TrackTargeted="1",
             TL_SQTrackExpandedHeight="41",
             currentExplodedTrackIndex="0",
-            totalExplodedTrackCount="2"
+            totalExplodedTrackCount="2",
         )
-        audio_track2 = ET.SubElement(
+        ET.SubElement(
             seq_audio,
             "track",
             premiereTrackType="Mono",
@@ -471,9 +491,9 @@ def generate_xmeml(
             MZ_TrackTargeted="1",
             TL_SQTrackExpandedHeight="41",
             currentExplodedTrackIndex="1",
-            totalExplodedTrackCount="2"
+            totalExplodedTrackCount="2",
         )
-        primary_audio_track = audio_track1   # we place the actual clipitems here
+        primary_audio_track = audio_track1  # we place the actual clipitems here
     else:
         # Fallback for true mono sources
         primary_audio_track = ET.SubElement(
@@ -482,9 +502,8 @@ def generate_xmeml(
             premiereTrackType="Mono",
             TL_SQTrackAudioKeyframeStyle="0",
             TL_SQTrackShy="0",
-            MZ_TrackTargeted="1"
+            MZ_TrackTargeted="1",
         )
-        audio_track2 = None
 
     # ------------------------------------------------------------------
     # Define the Global Source Duration (required for correct clipitem duration)
@@ -526,7 +545,9 @@ def generate_xmeml(
         ET.SubElement(clipitem, "masterclipid").text = "masterclip-1"
         ET.SubElement(clipitem, "name").text = f"{filename} - Segment {clip_idx}"
         # CRITICAL: Duration = FULL SOURCE FILE DURATION
-        ET.SubElement(clipitem, "duration").text = str(total_source_frames) if total_source_frames > 0 else str(dur_f)
+        ET.SubElement(clipitem, "duration").text = (
+            str(total_source_frames) if total_source_frames > 0 else str(dur_f)
+        )
 
         r = ET.SubElement(clipitem, "rate")
         ET.SubElement(r, "timebase").text = str(timebase)
@@ -637,7 +658,9 @@ def generate_xmeml(
         ET.SubElement(audio_clip, "masterclipid").text = "masterclip-1"
         ET.SubElement(audio_clip, "name").text = f"{filename} - Segment {clip_idx} (Audio)"
         ET.SubElement(audio_clip, "enabled").text = "TRUE"
-        ET.SubElement(audio_clip, "duration").text = str(total_source_frames) if total_source_frames > 0 else str(dur_f)
+        ET.SubElement(audio_clip, "duration").text = (
+            str(total_source_frames) if total_source_frames > 0 else str(dur_f)
+        )
 
         ar = ET.SubElement(audio_clip, "rate")
         ET.SubElement(ar, "timebase").text = str(timebase)

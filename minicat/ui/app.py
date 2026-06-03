@@ -18,17 +18,22 @@ import os
 import platform
 import re
 import shutil
-from datetime import datetime
 import subprocess
-import tempfile
-import time
-from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from nicegui import app, ui
 
+from minicat.ai import multi_xmeml_exporter, narrative_vo_exporter
+from minicat.ai.director import (
+    build_combined_labeled_transcript,
+    generate_director_cuts,
+    get_narrative_sequence,
+    validate_and_normalize_versions,
+)
+from minicat.ai.journalist_cutter import generate_journalist_cuts
+from minicat.ai.multi_xmeml_exporter import get_audio_characteristics
 from minicat.ai.tag_suggester import (
     suggest_tags_from_storyboard,
     suggest_tags_from_transcript,
@@ -36,54 +41,37 @@ from minicat.ai.tag_suggester import (
 from minicat.ai.transcriber import (
     ai_journalist_cut_to_srt_segments,
     segments_to_srt,
-    transcribe_audio_with_timestamps,
-    translate_transcription_segments,
-)
-from minicat.ai.journalist_cutter import generate_journalist_cuts
-from minicat.ai.director import (
-    generate_director_cuts,
-    build_combined_labeled_transcript,
-    validate_and_normalize_versions,
-    get_narrative_sequence,
 )
 from minicat.ai.voiceover import (
+    ensure_google_tts_package,
+    ensure_piper_package,
+    ensure_piper_voice_model,
+    find_gcloud,
     generate_narration_audio,
     generate_narration_audio_sync,
-    get_voice_for_language,
-    get_language_display_name,
-    get_tts_provider,
-    get_google_voices_for_language,
-    get_piper_voices_for_language,
-    get_tts_provider_display_name,
-    ensure_google_tts_package,
-    is_google_tts_available,
     get_google_tts_status,
+    get_google_voices_for_language,
     get_local_tts_status,
+    get_piper_voices_for_language,
+    get_tts_provider,
+    get_tts_provider_display_name,
     get_tts_status,
-    run_gcloud_auth_application_default,
-    is_gcloud_available,
-    find_gcloud,
-    is_piper_available,
-    ensure_piper_package,
     reset_piper_install_flag,
-    ensure_piper_voice_model,
+    run_gcloud_auth_application_default,
 )
-from minicat.core.settings import SUPPORTED_LANGUAGES
+
 # generate_xmeml is re-exported from fcpxml_exporter for compatibility;
 # the real implementation lives in xmeml_exporter.py (strict Premiere schema).
 from minicat.ai.xmeml_exporter import generate_xmeml, get_media_start_offset_and_duration
-from minicat.ai import narrative_vo_exporter
-from minicat.ai.multi_xmeml_exporter import prepare_director_sources, get_audio_characteristics
-from minicat.ai import multi_xmeml_exporter
 from minicat.core import config, db, settings, video
 
 # Layer 2: Background task controllers (extracted)
 from minicat.core import workers as task_workers
+from minicat.ui.components import dialogs as ui_dialogs
 
 # Layer 1: Component extractions
 from minicat.ui.components import drawers as ui_drawers
 from minicat.ui.components import inspector as ui_inspector
-from minicat.ui.components import dialogs as ui_dialogs
 
 # Language-specific test sentences for the "Test Current Voice" button in Text to Speech settings.
 # The test sentence is always chosen to match the currently selected voiceover language.
@@ -164,6 +152,7 @@ SCRIPT_LABELS = {
     },
 }
 
+
 def get_script_labels(lang: str | None) -> dict:
     """Return the label dict for the rich TXT script/story based on the transcripted/scripted language.
     Uses Finnish labels when the chosen language is 'fi' (or equivalent); English otherwise.
@@ -172,8 +161,8 @@ def get_script_labels(lang: str | None) -> dict:
     """
     if not lang:
         return SCRIPT_LABELS["en"]
-    l = str(lang).lower().strip()
-    if l in ("fi", "finnish"):
+    ll = str(lang).lower().strip()
+    if ll in ("fi", "finnish"):
         return SCRIPT_LABELS["fi"]
     # For "original" we leave English labels (content will be original lang, but structure English is conventional
     # and we may not know the original's language here). If caller passes the resolved original_language (e.g. "fi")
@@ -181,21 +170,21 @@ def get_script_labels(lang: str | None) -> dict:
     return SCRIPT_LABELS["en"]
 
 
-from minicat.core.models import Client, Project, SearchFilters, Video
-from minicat.core.settings import (
+from minicat.core.models import Client, Project, SearchFilters, Video  # noqa: E402
+from minicat.core.settings import (  # noqa: E402
+    DEFAULT_EXPORT_DIRECTORY,
     DEFAULT_GEMINI_MODEL,
     GEMINI_MODELS,
     PROXY_PRESETS,
+    create_export_subfolder,
+    get_default_export_directory,
     get_gemini_api_key,
     get_gemini_model,
     get_preference,
     get_proxy_default_burn_subtitles,
     get_proxy_default_burn_timecode,
     get_proxy_default_preset,
-    get_default_export_directory,
     set_default_export_directory,
-    create_export_subfolder,
-    DEFAULT_EXPORT_DIRECTORY,
     set_gemini_api_key,
     set_gemini_model,
     set_preference,
@@ -203,10 +192,8 @@ from minicat.core.settings import (
     set_proxy_default_burn_timecode,
     set_proxy_default_preset,
 )
-from minicat.core.video import (
+from minicat.core.video import (  # noqa: E402
     export_fcp7_xml,
-    export_ai_journalist_cut_audio,
-    export_ai_journalist_cut_video,
     get_available_subtitle_languages,
 )
 
@@ -214,15 +201,16 @@ from minicat.core.video import (
 # Global-ish state for the current session (single catalog per app instance)
 # ---------------------------------------------------------------------------
 
+
 class AppState:
     def __init__(self, catalog_root: Path):
         self.catalog_root = catalog_root
         self.videos: list[Video] = []
-        self.selected: Video | None = None       # Focused clip (shown in inspector)
-        self.selected_ids: set[int] = set()      # Multi-selection for batch ops / export
-        self.selected_project: str | None = None # Focused project (shown in inspector)
-        self.view_mode: str = "grid"             # "grid" or "list"
-        self.media_filter: str = "all"           # "all" | "video" | "audio"  (top bar view toggle)
+        self.selected: Video | None = None  # Focused clip (shown in inspector)
+        self.selected_ids: set[int] = set()  # Multi-selection for batch ops / export
+        self.selected_project: str | None = None  # Focused project (shown in inspector)
+        self.view_mode: str = "grid"  # "grid" or "list"
+        self.media_filter: str = "all"  # "all" | "video" | "audio"  (top bar view toggle)
 
         # List view column customization (user can reorder + hide columns by dragging in settings)
         self.list_column_order: list[str] = []
@@ -230,13 +218,13 @@ class AppState:
 
         self.filters = SearchFilters()
         self.all_projects: list[str] = []
-        self.all_clients: list[str] = []   # New
+        self.all_clients: list[str] = []  # New
         self.all_cameras: list[str] = []
         self.all_locations: list[str] = []
         self.all_tags: list[str] = []
 
         # Sort options for media view (grid + list)
-        self.sort_field: str = "shoot_date"   # filename, shoot_date, import_date, duration
+        self.sort_field: str = "shoot_date"  # filename, shoot_date, import_date, duration
         self.sort_desc: bool = True
 
         # Raw results from DB (before view filters like media type)
@@ -251,7 +239,9 @@ class AppState:
         self.all_tags = [t.name for t in db.get_all_tags(self.catalog_root)]
 
         # Apply current filters
-        self._raw_videos = db.search_videos(self.catalog_root, self.filters, limit=2000)  # higher limit so transcribed/processed clips stay visible in large libraries; use filters/search for very big catalogs
+        self._raw_videos = db.search_videos(
+            self.catalog_root, self.filters, limit=2000
+        )  # higher limit so transcribed/processed clips stay visible in large libraries; use filters/search for very big catalogs
 
         # Apply user-selected sort + media view filter
         self.apply_sort()
@@ -309,7 +299,9 @@ class AppState:
             current = current + [tag]
         self.filters.tags = current or None
         self.reload()
-        refresh_all_ui(self)   # ensure toolbar, drawers, everything stays consistent including current sort mode
+        refresh_all_ui(
+            self
+        )  # ensure toolbar, drawers, everything stays consistent including current sort mode
 
     def clear_filters(self) -> None:
         self.filters = SearchFilters()
@@ -454,12 +446,25 @@ class AppState:
         if self.media_filter != "all":
             try:
                 from minicat.cli.main import _is_audio_file
+
                 is_audio_fn = _is_audio_file
             except Exception:
+
                 def is_audio_fn(p: Path) -> bool:
                     return p.suffix.lower() in {
-                        ".wav", ".wave", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".oga",
-                        ".aiff", ".aif", ".aifc", ".wma", ".opus",
+                        ".wav",
+                        ".wave",
+                        ".mp3",
+                        ".m4a",
+                        ".aac",
+                        ".flac",
+                        ".ogg",
+                        ".oga",
+                        ".aiff",
+                        ".aif",
+                        ".aifc",
+                        ".wma",
+                        ".opus",
                     }
 
             if self.media_filter == "audio":
@@ -509,8 +514,8 @@ class AppState:
 
 # Global state (set when the app starts)
 STATE: AppState | None = None
-CONTENT: ui.element | None = None   # Persistent container for all dynamic content
-APP_MODE: str = "welcome"           # "welcome" or "app"
+CONTENT: ui.element | None = None  # Persistent container for all dynamic content
+APP_MODE: str = "welcome"  # "welcome" or "app"
 
 # Reference to the right drawer element so we can show/hide it dynamically
 RIGHT_DRAWER: Any = None
@@ -540,12 +545,19 @@ def main_content() -> None:
                     create_media_grid()
             except Exception as render_err:
                 import traceback
+
                 traceback.print_exc()
                 print(f"[Render] Error in central content: {render_err}")
                 with ui.column().classes("w-full p-8 text-center"):
                     ui.label("Error rendering media view").classes("text-h6 text-red")
                     ui.label(str(render_err)).classes("text-sm text-grey-6 mt-2")
-                    ui.button("Try Grid View", on_click=lambda: (setattr(state, 'view_mode', 'grid'), main_content.refresh())).classes("mt-4")
+                    ui.button(
+                        "Try Grid View",
+                        on_click=lambda: (
+                            setattr(state, "view_mode", "grid"),
+                            main_content.refresh(),
+                        ),
+                    ).classes("mt-4")
                     ui.button("Reload Page", on_click=lambda: ui.navigate.reload()).classes("mt-2")
 
 
@@ -567,22 +579,62 @@ def _render_project_inspector(state: AppState, name: str) -> None:
 
     # Editable fields - high density form controls
     with ui.column().classes("gap-0 p-0 m-0"):
-        start = ui.input("Start Date", value=str(proj.start_date) if proj.start_date else "").props("dense outlined square").classes("w-full text-xs q-my-none")
-        end = ui.input("End Date", value=str(proj.end_date) if proj.end_date else "").props("dense outlined square").classes("w-full text-xs q-my-none")
-        client = ui.input("Client", value=proj.client or "").props("dense outlined square").classes("w-full text-xs q-my-none")
-        director = ui.input("Director", value=proj.director or "").props("dense outlined square").classes("w-full text-xs q-my-none")
-        producer = ui.input("Producer", value=proj.producer or "").props("dense outlined square").classes("w-full text-xs q-my-none")
-        editor = ui.input("Editor", value=proj.editor or "").props("dense outlined square").classes("w-full text-xs q-my-none")
-        ops = ui.input("Camera Operators", value=", ".join(proj.camera_operators)).props("dense outlined square").classes("w-full text-xs q-my-none")
-        loc = ui.input("Location", value=proj.location or "").props("dense outlined square").classes("w-full text-xs q-my-none")
+        start = (
+            ui.input("Start Date", value=str(proj.start_date) if proj.start_date else "")
+            .props("dense outlined square")
+            .classes("w-full text-xs q-my-none")
+        )
+        end = (
+            ui.input("End Date", value=str(proj.end_date) if proj.end_date else "")
+            .props("dense outlined square")
+            .classes("w-full text-xs q-my-none")
+        )
+        client = (
+            ui.input("Client", value=proj.client or "")
+            .props("dense outlined square")
+            .classes("w-full text-xs q-my-none")
+        )
+        director = (
+            ui.input("Director", value=proj.director or "")
+            .props("dense outlined square")
+            .classes("w-full text-xs q-my-none")
+        )
+        producer = (
+            ui.input("Producer", value=proj.producer or "")
+            .props("dense outlined square")
+            .classes("w-full text-xs q-my-none")
+        )
+        editor = (
+            ui.input("Editor", value=proj.editor or "")
+            .props("dense outlined square")
+            .classes("w-full text-xs q-my-none")
+        )
+        ops = (
+            ui.input("Camera Operators", value=", ".join(proj.camera_operators))
+            .props("dense outlined square")
+            .classes("w-full text-xs q-my-none")
+        )
+        loc = (
+            ui.input("Location", value=proj.location or "")
+            .props("dense outlined square")
+            .classes("w-full text-xs q-my-none")
+        )
 
-        status = ui.select(
-            ["Pre-production", "Production", "Post-production", "Delivered", "Archived"],
-            value=proj.status,
-            label="Status"
-        ).props("dense outlined square").classes("w-full text-xs q-my-none")
+        status = (
+            ui.select(
+                ["Pre-production", "Production", "Post-production", "Delivered", "Archived"],
+                value=proj.status,
+                label="Status",
+            )
+            .props("dense outlined square")
+            .classes("w-full text-xs q-my-none")
+        )
 
-        notes = ui.textarea("Notes", value=proj.notes or "").props("dense outlined square").classes("w-full text-xs q-my-none")
+        notes = (
+            ui.textarea("Notes", value=proj.notes or "")
+            .props("dense outlined square")
+            .classes("w-full text-xs q-my-none")
+        )
 
     def save_project():
         proj.start_date = date.fromisoformat(start.value) if start.value else None
@@ -606,7 +658,9 @@ def _render_project_inspector(state: AppState, name: str) -> None:
         ui.button("Close", on_click=state.clear_project_selection).props("size=sm outline")
 
     ui.separator().classes("my-4")
-    ui.label("Tip: Use the left sidebar to filter clips by this project.").classes("text-xs text-grey-6")
+    ui.label("Tip: Use the left sidebar to filter clips by this project.").classes(
+        "text-xs text-grey-6"
+    )
 
 
 async def _batch_generate_proxies(state: AppState) -> None:
@@ -619,20 +673,26 @@ async def _batch_generate_proxies(state: AppState) -> None:
 
     with ui.dialog() as settings_dialog, ui.card().classes("w-[560px]"):
         ui.label("Generate Proxies").classes("text-h6 mb-1")
-        ui.label("Choose a profile. Each has fixed resolution, codec, and container optimized for its use case.").classes("text-xs text-grey-6 mb-3")
+        ui.label(
+            "Choose a profile. Each has fixed resolution, codec, and container optimized for its use case."
+        ).classes("text-xs text-grey-6 mb-3")
 
         preset = ui.select(
             core_settings.PROXY_PRESETS,
             value=core_settings.get_proxy_default_preset(),
-            label="Proxy Profile"
+            label="Proxy Profile",
         ).props("dense")
 
         with ui.row().classes("justify-end gap-2 mt-6 w-full"):
             ui.button("Cancel", on_click=settings_dialog.close).props("flat")
-            ui.button("Generate Proxies", color="primary", on_click=lambda: (
-                settings_dialog.close(),
-                asyncio.create_task(_do_batch_proxy_generation(state, selected, preset.value))
-            ))
+            ui.button(
+                "Generate Proxies",
+                color="primary",
+                on_click=lambda: (
+                    settings_dialog.close(),
+                    asyncio.create_task(_do_batch_proxy_generation(state, selected, preset.value)),
+                ),
+            )
 
     settings_dialog.open()
 
@@ -652,7 +712,9 @@ async def _do_batch_proxy_generation(
         status_label = ui.label("Starting...").classes("text-sm mt-2")
         file_label = ui.label("").classes("text-xs text-grey-6")
 
-        close_btn = ui.button("Close", on_click=progress_dialog.close).props("flat").classes("mt-4 w-full")
+        close_btn = (
+            ui.button("Close", on_click=progress_dialog.close).props("flat").classes("mt-4 w-full")
+        )
         close_btn.visible = False
 
     progress_dialog.open()
@@ -661,6 +723,7 @@ async def _do_batch_proxy_generation(
     # Pre-flight ffmpeg check
     try:
         from minicat.core.video import find_ffmpeg
+
         find_ffmpeg()
     except RuntimeError:
         progress_dialog.close()
@@ -684,7 +747,10 @@ async def _do_batch_proxy_generation(
 
             # Use correct extension for the chosen profile
             from minicat.core.video import PROXY_PROFILE_DEFS
-            profile = PROXY_PROFILE_DEFS.get(preset, PROXY_PROFILE_DEFS["Apple ProRes Proxy (Standard NLE Workflow)"])
+
+            profile = PROXY_PROFILE_DEFS.get(
+                preset, PROXY_PROFILE_DEFS["Apple ProRes Proxy (Standard NLE Workflow)"]
+            )
             ext = profile.get("ext", ".mov")
             proxy_name = Path(clip.path).stem + "_proxy" + ext
             proxy_out = proxy_dir / proxy_name
@@ -731,6 +797,7 @@ async def _do_batch_proxy_generation(
 # Export Dialog helpers (single clip + multiclip)
 # ---------------------------------------------------------------------------
 
+
 def _show_single_clip_export_dialog(state: AppState, video: Video) -> None:
     """Opens the export dialog for a single clip (Clio/Inspector view)."""
     _show_export_dialog(state, [video], is_single=True)
@@ -755,16 +822,18 @@ def _show_export_dialog(state: AppState, videos: list[Video], is_single: bool = 
     video = videos[0]  # for single-clip subtitle discovery etc.
 
     with ui.dialog() as dialog, ui.card().classes("w-[520px]"):
-        ui.label("Export" + ("" if is_single else f" ({len(videos)} clips)")).classes("text-h5 mb-2")
+        ui.label("Export" + ("" if is_single else f" ({len(videos)} clips)")).classes(
+            "text-h5 mb-2"
+        )
 
         # 1. Quality
         ui.label("Quality").classes("text-base font-semibold mt-3 mb-1")
         quality_options = ["Original (highest quality)"] + core_settings.PROXY_PRESETS
-        quality = ui.select(
-            quality_options,
-            value=quality_options[0],
-            label="Export Source"
-        ).props("dense").classes("w-full")
+        quality = (
+            ui.select(quality_options, value=quality_options[0], label="Export Source")
+            .props("dense")
+            .classes("w-full")
+        )
 
         # 2. Timecode
         burn_tc = ui.checkbox("Burn timecode on video", value=True).classes("mt-3")
@@ -781,18 +850,21 @@ def _show_export_dialog(state: AppState, videos: list[Video], is_single: bool = 
                 available_subs = []
 
         sub_options = [("none", "None")] + [(lang, display) for lang, display in available_subs]
-        sub_display_map = {lang: display for lang, display in sub_options}
+        {lang: display for lang, display in sub_options}
         sub_value_map = {display: lang for lang, display in sub_options}
 
-        subtitle_choice = ui.select(
-            [display for _, display in sub_options],
-            value="None",
-            label="Burn subtitles (choose language)"
-        ).props("dense").classes("w-full")
+        subtitle_choice = (
+            ui.select(
+                [display for _, display in sub_options],
+                value="None",
+                label="Burn subtitles (choose language)",
+            )
+            .props("dense")
+            .classes("w-full")
+        )
 
         export_subs_separate = ui.checkbox(
-            "Also export chosen subtitles as separate .srt file (not burned)",
-            value=False
+            "Also export chosen subtitles as separate .srt file (not burned)", value=False
         ).classes("mt-2")
 
         # Action buttons
@@ -835,8 +907,9 @@ async def _perform_export(
     export_subtitle_file: bool,
 ) -> None:
     """Does the actual work of exporting based on user choices."""
-    from minicat.core.video import get_subtitle_srt_path
     import shutil
+
+    from minicat.core.video import get_subtitle_srt_path
 
     export_dir = get_default_export_directory()
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -853,7 +926,7 @@ async def _perform_export(
             else:
                 # Try to find the matching proxy
                 proxy_dir = state.catalog_root / "proxies" / (v.project or "Uncategorized")
-                proxy_name = Path(v.path).stem + "_proxy.mov"   # most profiles use .mov
+                Path(v.path).stem + "_proxy.mov"  # most profiles use .mov
                 # For H.264/HEVC profiles the extension might be .mp4 — we try common names
                 candidates = [
                     proxy_dir / (Path(v.path).stem + "_proxy.mov"),
@@ -885,14 +958,12 @@ async def _perform_export(
                 # We need to render (burn timecode and/or subtitles)
                 # For now we reuse the proxy machinery when possible, or do a simple burn pass.
                 # This is a pragmatic first implementation.
-                from minicat.core.video import burn_subtitles_to_video
 
                 # If we need timecode burn or we're on original + burns, we currently route through
                 # a proxy-style render. A more complete dedicated exporter can be added later.
                 # For simplicity in this first version we always produce an H.264 file when burns are requested.
 
                 # Build a temporary path for the base render if needed
-                work_path = final_out
 
                 # Very basic path: if user chose a proxy profile and it exists, use it as base.
                 # If burns are needed, we run burn_subtitles_to_video on top (timecode is not yet
@@ -942,6 +1013,7 @@ def _batch_delete_selected(state: AppState) -> None:
 
         with ui.row().classes("justify-end gap-2 mt-4 w-full"):
             ui.button("Cancel", on_click=dialog.close).props("flat")
+
             def do_batch_delete():
                 deleted = 0
                 for v in selected:
@@ -949,17 +1021,26 @@ def _batch_delete_selected(state: AppState) -> None:
                         # Clean up all generated files (previews, transcription proxy audio, transcripts, subtitles, proxies)
                         try:
                             from minicat.core.video import cleanup_all_generated_files_for_clip
-                            cleanup_all_generated_files_for_clip(v.id, state.catalog_root, original_filename=v.filename)
+
+                            cleanup_all_generated_files_for_clip(
+                                v.id, state.catalog_root, original_filename=v.filename
+                            )
                         except Exception as cleanup_ex:
-                            print(f"[Delete from Library] Artifact cleanup failed for {v.id}: {cleanup_ex}")
+                            print(
+                                f"[Delete from Library] Artifact cleanup failed for {v.id}: {cleanup_ex}"
+                            )
 
                         if db.delete_video(state.catalog_root, v.id):
                             deleted += 1
                 dialog.close()
                 state.clear_selection()
                 refresh_all_ui(state)
-                ui.notify(f"Removed {deleted} clips from catalog (all generated files cleaned up)", color="positive")
+                ui.notify(
+                    f"Removed {deleted} clips from catalog (all generated files cleaned up)",
+                    color="positive",
+                )
                 _schedule_orphan_cleanup(state)
+
             ui.button(f"Remove {count} Clips", on_click=do_batch_delete, color="negative")
 
     dialog.open()
@@ -971,10 +1052,14 @@ def _schedule_orphan_cleanup(state: AppState) -> None:
     this catches any edge cases or legacy ghosts immediately without blocking UI.
     """
     try:
-        from minicat.core.video import cleanup_orphaned_catalog_files
         import asyncio as _aio
+
+        from minicat.core.video import cleanup_orphaned_catalog_files
+
         clip_ids = {v.id for v in (getattr(state, "videos", []) or []) if getattr(v, "id", None)}
-        _aio.create_task(_aio.to_thread(cleanup_orphaned_catalog_files, state.catalog_root, clip_ids))
+        _aio.create_task(
+            _aio.to_thread(cleanup_orphaned_catalog_files, state.catalog_root, clip_ids)
+        )
     except Exception as _ex:
         print(f"[Cleanup] Post-delete orphan sweep failed to schedule: {_ex}")
 
@@ -984,6 +1069,7 @@ def _schedule_orphan_cleanup(state: AppState) -> None:
 # "DELETE FROM LIBRARY" = safe, only removes from CAT+TAG
 # "DELETE FROM DISK"    = dangerous, removes from catalog + deletes original files
 # ---------------------------------------------------------------------------
+
 
 def _delete_media_file_from_disk(state: AppState, video: Video) -> bool:
     """Internal helper: deletes the physical file from disk + removes from catalog.
@@ -1007,7 +1093,10 @@ def _delete_media_file_from_disk(state: AppState, video: Video) -> bool:
     # Thorough cleanup of all generated artifacts (previews, audio, transcripts, subtitles, proxies)
     try:
         from minicat.core.video import cleanup_all_generated_files_for_clip
-        cleanup_all_generated_files_for_clip(video.id, state.catalog_root, original_filename=video.filename)
+
+        cleanup_all_generated_files_for_clip(
+            video.id, state.catalog_root, original_filename=video.filename
+        )
     except Exception as ex:
         print(f"[Delete from Disk] Artifact cleanup failed for {video.id}: {ex}")
 
@@ -1026,7 +1115,9 @@ def _batch_delete_media_and_disk(state: AppState) -> None:
 
     with ui.dialog() as dialog, ui.card().classes("w-[440px]"):
         ui.label("⚠️ DELETE FROM DISK — Are you 100% sure?").classes("text-h6 text-negative")
-        ui.label(f"This will permanently delete the original media file(s) for {count} clip(s) from your computer.").classes("text-sm")
+        ui.label(
+            f"This will permanently delete the original media file(s) for {count} clip(s) from your computer."
+        ).classes("text-sm")
         ui.label("The clips will also be removed from the CAT+TAG catalog.").classes("text-sm mt-1")
         ui.label("THIS ACTION CANNOT BE UNDONE.").classes("text-sm font-bold mt-2 text-negative")
 
@@ -1038,6 +1129,7 @@ def _batch_delete_media_and_disk(state: AppState) -> None:
 
         with ui.row().classes("justify-end gap-2 mt-4 w-full"):
             ui.button("Cancel", on_click=dialog.close).props("flat")
+
             def do_delete_from_disk():
                 deleted_count = 0
                 for v in selected:
@@ -1046,8 +1138,15 @@ def _batch_delete_media_and_disk(state: AppState) -> None:
                 dialog.close()
                 state.clear_selection()
                 refresh_all_ui(state)
-                ui.notify(f"Deleted {deleted_count} clip(s) from library and disk", color="negative")
-            ui.button(f"YES, DELETE {count} FILE(S) FROM DISK", on_click=do_delete_from_disk, color="negative")
+                ui.notify(
+                    f"Deleted {deleted_count} clip(s) from library and disk", color="negative"
+                )
+
+            ui.button(
+                f"YES, DELETE {count} FILE(S) FROM DISK",
+                on_click=do_delete_from_disk,
+                color="negative",
+            )
 
     dialog.open()
 
@@ -1060,18 +1159,22 @@ def _delete_from_disk_single(state: AppState, video: Video) -> None:
 
     with ui.dialog() as dialog, ui.card().classes("w-96"):
         ui.label("⚠️ DELETE FROM DISK — Are you 100% sure?").classes("text-h6 text-negative")
-        ui.label(f"This will permanently delete the original media file from your computer:\n{video.filename}").classes("text-sm")
+        ui.label(
+            f"This will permanently delete the original media file from your computer:\n{video.filename}"
+        ).classes("text-sm")
         ui.label("It will also be removed from the CAT+TAG catalog.").classes("text-sm mt-1")
         ui.label("THIS ACTION CANNOT BE UNDONE.").classes("text-sm font-bold mt-2 text-negative")
 
         with ui.row().classes("justify-end gap-2 mt-4 w-full"):
             ui.button("Cancel", on_click=dialog.close).props("flat")
+
             def do_delete():
                 _delete_media_file_from_disk(state, video)
                 dialog.close()
                 state.clear_selection()
                 refresh_all_ui(state)
                 ui.notify("Clip deleted from library and disk", color="negative")
+
             ui.button("YES, DELETE FROM DISK", on_click=do_delete, color="negative")
 
     dialog.open()
@@ -1093,6 +1196,8 @@ async def _copy_selected_clips_with_xml(state: AppState) -> None:
 
     # --- 1. Ask user for destination folder ---
     try:
+        import webview
+
         if webview and webview.windows:
             dest_folder = webview.windows[0].create_file_dialog(
                 webview.OPEN_DIALOG | webview.DIALOG_DIRECTORY,
@@ -1113,13 +1218,17 @@ async def _copy_selected_clips_with_xml(state: AppState) -> None:
         ui.label("Copy Clips + Generate XML").classes("text-h6 mb-2")
         ui.label(f"This will copy {count} media file(s) to:").classes("text-sm")
         ui.label(str(dest)).classes("text-sm font-mono break-all")
-        ui.label("An XML file will also be created in the same folder, with all media paths pointing to the copies.").classes("text-sm mt-2")
+        ui.label(
+            "An XML file will also be created in the same folder, with all media paths pointing to the copies."
+        ).classes("text-sm mt-2")
 
         with ui.row().classes("justify-end gap-2 mt-4 w-full"):
             ui.button("Cancel", on_click=confirm.close).props("flat")
+
             async def do_copy():
                 confirm.close()
                 await _perform_copy_and_xml(state, selected, dest)
+
             ui.button("Copy + Generate XML", icon="folder_copy", on_click=do_copy, color="primary")
 
     confirm.open()
@@ -1150,7 +1259,7 @@ async def _perform_copy_and_xml(state: AppState, selected: list[Video], dest_fol
     for i, v in enumerate(selected):
         percent = (i + 1) / total
         progress.value = percent
-        status.text = f"Copying {i+1}/{total}"
+        status.text = f"Copying {i + 1}/{total}"
         file_label.text = v.filename
         ui.update(progress, status, file_label)
 
@@ -1205,7 +1314,7 @@ async def _perform_copy_and_xml(state: AppState, selected: list[Video], dest_fol
     # Final summary
     status.text = "Finished"
     summary_text = f"Copied {len(copied_files)} / {total} files to:\n{dest_folder}"
-    if 'xml_path' in locals() and xml_path and xml_path.exists():
+    if "xml_path" in locals() and xml_path and xml_path.exists():
         summary_text += f"\n\nXML created: {xml_path.name}"
     if errors:
         summary_text += f"\n\nErrors: {len(errors)}"
@@ -1218,10 +1327,16 @@ async def _perform_copy_and_xml(state: AppState, selected: list[Video], dest_fol
     prog.close()
 
     if copied_files:
-        ui.notify(f"Copied {len(copied_files)} clips + XML to {dest_folder.name}", color="positive", duration=8)
+        ui.notify(
+            f"Copied {len(copied_files)} clips + XML to {dest_folder.name}",
+            color="positive",
+            duration=8,
+        )
         # Reveal folder
         try:
-            import platform, subprocess
+            import platform
+            import subprocess
+
             if platform.system() == "Darwin":
                 subprocess.run(["open", str(dest_folder)])
             elif platform.system() == "Windows":
@@ -1240,16 +1355,24 @@ def _delete_from_library_single(state: AppState, video: Video) -> None:
 
     with ui.dialog() as dialog, ui.card().classes("w-96"):
         ui.label("Delete from Library?").classes("text-h6")
-        ui.label(f"This will only remove the clip from the CAT+TAG catalog:\n{video.filename}").classes("text-sm")
-        ui.label("The original media file will remain on your disk.").classes("text-sm text-grey-6 mt-1")
+        ui.label(
+            f"This will only remove the clip from the CAT+TAG catalog:\n{video.filename}"
+        ).classes("text-sm")
+        ui.label("The original media file will remain on your disk.").classes(
+            "text-sm text-grey-6 mt-1"
+        )
 
         with ui.row().classes("justify-end gap-2 mt-4 w-full"):
             ui.button("Cancel", on_click=dialog.close).props("flat")
+
             def do_delete():
                 # Thorough cleanup of all generated artifacts before removing from DB
                 try:
                     from minicat.core.video import cleanup_all_generated_files_for_clip
-                    cleanup_all_generated_files_for_clip(video.id, state.catalog_root, original_filename=video.filename)
+
+                    cleanup_all_generated_files_for_clip(
+                        video.id, state.catalog_root, original_filename=video.filename
+                    )
                 except Exception as cleanup_ex:
                     print(f"[Delete from Library] Artifact cleanup failed: {cleanup_ex}")
 
@@ -1257,8 +1380,12 @@ def _delete_from_library_single(state: AppState, video: Video) -> None:
                 dialog.close()
                 state.clear_selection()
                 refresh_all_ui(state)
-                ui.notify("Removed from CAT+TAG library (all generated files cleaned up)", color="positive")
+                ui.notify(
+                    "Removed from CAT+TAG library (all generated files cleaned up)",
+                    color="positive",
+                )
                 _schedule_orphan_cleanup(state)
+
             ui.button("DELETE FROM LIBRARY", on_click=do_delete, color="negative")
 
     dialog.open()
@@ -1274,9 +1401,19 @@ def _rebuild_clip_previews_and_metadata(state: AppState, clip: Video) -> bool:
     # Guard: audio files have no video previews; just refresh metadata
     try:
         from minicat.cli.main import _is_audio_file
+
         is_audio = _is_audio_file(Path(clip.path))
     except Exception:
-        is_audio = Path(clip.path).suffix.lower() in {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".aiff", ".aif"}
+        is_audio = Path(clip.path).suffix.lower() in {
+            ".wav",
+            ".mp3",
+            ".m4a",
+            ".aac",
+            ".flac",
+            ".ogg",
+            ".aiff",
+            ".aif",
+        }
 
     if is_audio:
         updates: dict[str, Any] = {}
@@ -1294,9 +1431,7 @@ def _rebuild_clip_previews_and_metadata(state: AppState, clip: Video) -> bool:
 
     try:
         # Generate previews (video only)
-        thumb, board = video.generate_previews(
-            clip.path, state.catalog_root, clip.id
-        )
+        thumb, board = video.generate_previews(clip.path, state.catalog_root, clip.id)
 
         updates: dict[str, Any] = {
             "thumbnail_path": str(thumb),
@@ -1380,9 +1515,11 @@ def _batch_rebuild_previews_and_metadata(state: AppState) -> None:
 # Transcription proxy audio management (persistent <catalog>/audio/ for transcription + AI listening)
 # ---------------------------------------------------------------------------
 
+
 def _get_audio_cache_info(clip: Video, catalog_root: Path) -> dict:
     """Return info about the single transcription proxy audio file for one clip."""
     from minicat.core.video import get_cached_audio_path
+
     p = get_cached_audio_path(clip.id, catalog_root)
     if p.exists():
         size = p.stat().st_size
@@ -1393,6 +1530,7 @@ def _get_audio_cache_info(clip: Video, catalog_root: Path) -> dict:
 def _clear_audio_cache_for_clips(clips: list[Video], catalog_root: Path) -> tuple[int, int]:
     """Clear the single transcription proxy audio file for a list of clips. Returns (deleted_files, clips_affected)."""
     from minicat.core.video import clear_cached_audio
+
     total_deleted = 0
     affected = 0
     for clip in clips:
@@ -1407,12 +1545,17 @@ def _clear_audio_cache_for_clips(clips: list[Video], catalog_root: Path) -> tupl
 def _rebuild_audio_cache_for_clips(state: AppState, clips: list[Video]) -> None:
     """Rebuild (clear + re-extract with full processing) the transcription proxy audio for selected clips."""
     from minicat.core.video import rebuild_cached_audio_for_clip
+
     if not clips:
         return
 
     count = len(clips)
     success = 0
-    notif = ui.notification(f"Rebuilding transcription proxy audio for {count} clips...", type="ongoing", close_button=False)
+    notif = ui.notification(
+        f"Rebuilding transcription proxy audio for {count} clips...",
+        type="ongoing",
+        close_button=False,
+    )
 
     for i, clip in enumerate(clips, 1):
         notif.message = f"Audio proxy {i}/{count}: {clip.filename}"
@@ -1425,7 +1568,11 @@ def _rebuild_audio_cache_for_clips(state: AppState, clips: list[Video]) -> None:
 
     notif.dismiss()
     refresh_all_ui(state)
-    ui.notify(f"Rebuilt transcription proxy audio for {success}/{count} clips", color="positive", duration=6)
+    ui.notify(
+        f"Rebuilt transcription proxy audio for {success}/{count} clips",
+        color="positive",
+        duration=6,
+    )
 
 
 def _batch_clear_audio_cache(state: AppState) -> None:
@@ -1449,7 +1596,11 @@ def _batch_clear_audio_cache(state: AppState) -> None:
         ).classes("text-sm mb-4")
         with ui.row().classes("gap-2 w-full"):
             ui.button("Cancel", on_click=confirm.close).props("outline")
-            ui.button("Yes, Clear Cached Audio", color="negative", on_click=lambda: (confirm.close(), do_clear()))
+            ui.button(
+                "Yes, Clear Cached Audio",
+                color="negative",
+                on_click=lambda: (confirm.close(), do_clear()),
+            )
 
 
 def _batch_rebuild_audio_cache(state: AppState) -> None:
@@ -1465,11 +1616,16 @@ def _purge_legacy_audio_wavs(state: AppState) -> None:
     This cleans the catalog's audio/ folder without affecting modern .m4a proxies or requiring a rebuild.
     """
     from minicat.core.video import purge_legacy_wav_caches
+
     try:
         count = purge_legacy_wav_caches(state.catalog_root)
         refresh_all_ui(state)
         if count > 0:
-            ui.notify(f"Purged {count} legacy .wav file(s) from catalog audio/ folder", color="positive", duration=6)
+            ui.notify(
+                f"Purged {count} legacy .wav file(s) from catalog audio/ folder",
+                color="positive",
+                duration=6,
+            )
         else:
             ui.notify("No legacy .wav audio caches found to purge", color="info")
     except Exception as ex:
@@ -1516,6 +1672,7 @@ def _render_active_filters(state: AppState) -> None:
         # Render each active tag as its own removable chip (so user can remove one by one)
         if state.filters.tags:
             for tag in state.filters.tags:
+
                 def make_tag_remover(t=tag):
                     def remove_one():
                         if state.filters.tags:
@@ -1523,36 +1680,43 @@ def _render_active_filters(state: AppState) -> None:
                             state.filters.tags = new_tags or None
                         state.reload()
                         refresh_all_ui(state)
+
                     return remove_one
 
                 ui.chip(f"Tag: {tag}", removable=True, color="primary").props("size=sm outline").on(
                     "remove", make_tag_remover()
                 )
 
-        ui.button("Clear all", icon="clear_all", on_click=state.clear_filters).props("size=xs flat dense")
+        ui.button("Clear all", icon="clear_all", on_click=state.clear_filters).props(
+            "size=xs flat dense"
+        )
 
 
 # ---------------------------------------------------------------------------
 # UI Components
 # ---------------------------------------------------------------------------
 
+
 def _open_catalog_dialog() -> None:
     """Open a different CAT+TAG catalog from the top bar.
     Any folder is accepted: it will be created/initialized as a catalog if needed.
     Default catalog location is ~/CAT+TAG .
     """
-    state = get_state()
+    get_state()
 
     with ui.dialog() as dialog, ui.card().classes("w-96"):
         ui.label("Open Another Catalog").classes("text-h6 mb-3")
 
-        ui.label("Select or enter a folder to use (or create) as your CAT+TAG catalog.\nDefault is ~/CAT+TAG .").classes("text-sm text-grey-6 mb-2")
+        ui.label(
+            "Select or enter a folder to use (or create) as your CAT+TAG catalog.\nDefault is ~/CAT+TAG ."
+        ).classes("text-sm text-grey-6 mb-2")
 
         selected_path = ui.label("(No folder selected)").classes("text-xs text-grey-5 mb-3")
 
         def choose_folder():
             try:
                 import webview
+
                 if webview.windows:
                     result = webview.windows[0].create_file_dialog(
                         webview.FileDialog.FOLDER,
@@ -1571,7 +1735,9 @@ def _open_catalog_dialog() -> None:
             except Exception:
                 ui.notify("Please enter the path manually below", color="info")
 
-        ui.button("Choose Folder...", icon="folder", on_click=choose_folder).props("outline").classes("w-full mb-3")
+        ui.button("Choose Folder...", icon="folder", on_click=choose_folder).props(
+            "outline"
+        ).classes("w-full mb-3")
 
         manual_path = ui.input("Or paste catalog folder path").props("dense").classes("w-full mb-2")
 
@@ -1600,14 +1766,18 @@ def _open_catalog_dialog() -> None:
 
 def create_header() -> None:
     """Ultra-dense NLE-style topbar header with view controls and import/export actions."""
-    with ui.header(elevated=False).props('bordered').classes('bg-[#161618] text-zinc-300 border-b border-zinc-800/40 q-py-xs q-px-sm items-center justify-between gap-x-3 shadow-none'):
-
+    with (
+        ui.header(elevated=False)
+        .props("bordered")
+        .classes(
+            "bg-[#161618] text-zinc-300 border-b border-zinc-800/40 q-py-xs q-px-sm items-center justify-between gap-x-3 shadow-none"
+        )
+    ):
         # === LEFT: Application Title + Open Catalog (icon only) ===
         with ui.row().classes("items-center no-wrap gap-x-2"):
-            ui.button(
-                icon="folder_open",
-                on_click=_open_catalog_dialog
-            ).props("flat dense size=sm").tooltip("Open Catalog")
+            ui.button(icon="folder_open", on_click=_open_catalog_dialog).props(
+                "flat dense size=sm"
+            ).tooltip("Open Catalog")
 
             ui.html(
                 '<span class="text-[15px] font-semibold tracking-tight text-white">CAT</span>'
@@ -1615,7 +1785,9 @@ def create_header() -> None:
                 '<span class="text-[15px] font-semibold tracking-tight text-white">TAG</span>'
             )
 
-            ui.chip("Local", icon="lock", color="primary").props("outline size=xs dense").classes("text-[10px]")
+            ui.chip("Local", icon="lock", color="primary").props("outline size=xs dense").classes(
+                "text-[10px]"
+            )
 
         # === CENTER: Omnibar Search (smooth, border-minimal NLE style) ===
         with ui.row().classes("flex-1 justify-center items-center no-wrap px-2"):
@@ -1624,9 +1796,11 @@ def create_header() -> None:
                 "focus-within:border-zinc-700/70 w-[540px] max-w-[50vw] pr-1"
             ):
                 ui.icon("search").classes("text-[15px] text-zinc-500 ml-3 mr-1")
-                search_input = ui.input(
-                    placeholder="Search library..."
-                ).props('dense dark borderless clearable').classes('flex-1 text-xs')
+                search_input = (
+                    ui.input(placeholder="Search library...")
+                    .props("dense dark borderless clearable")
+                    .classes("flex-1 text-xs")
+                )
 
             def _apply_search():
                 val = (search_input.value or "").strip()
@@ -1635,63 +1809,65 @@ def create_header() -> None:
                     state.set_filter_text(val or None)
 
             search_input.on("update:model-value", lambda e: _apply_search())
-            globals()['_header_search_input'] = search_input
+            globals()["_header_search_input"] = search_input
 
         # === RIGHT: View Controls + Import/Export + Utilities ===
         with ui.row().classes("items-center no-wrap gap-x-1 text-xs"):
-
             # Grid / List density view controls
-            ui.button(
-                icon="grid_view",
-                on_click=lambda: _header_set_view_mode("grid")
-            ).props("flat dense size=xs").classes("text-zinc-400").tooltip("Grid View")
+            ui.button(icon="grid_view", on_click=lambda: _header_set_view_mode("grid")).props(
+                "flat dense size=xs"
+            ).classes("text-zinc-400").tooltip("Grid View")
 
-            ui.button(
-                icon="list",
-                on_click=lambda: _header_set_view_mode("list")
-            ).props("flat dense size=xs").classes("text-zinc-400").tooltip("List View")
+            ui.button(icon="list", on_click=lambda: _header_set_view_mode("list")).props(
+                "flat dense size=xs"
+            ).classes("text-zinc-400").tooltip("List View")
 
             ui.separator().props("vertical").classes("mx-0.5 h-4")
 
             # Import Folder
-            ui.button(
-                "Import",
-                icon="folder_open",
-                on_click=lambda: trigger_import()
-            ).props("flat dense size=xs").classes("text-zinc-300").tooltip("Import Folder")
+            ui.button("Import", icon="folder_open", on_click=lambda: trigger_import()).props(
+                "flat dense size=xs"
+            ).classes("text-zinc-300").tooltip("Import Folder")
 
             # Export XML
-            ui.button(
-                "XML",
-                icon="upload",
-                on_click=lambda: _header_export_xml()
-            ).props("flat dense size=xs").classes("text-zinc-300").tooltip("Export XML (selected or all visible)")
+            ui.button("XML", icon="upload", on_click=lambda: _header_export_xml()).props(
+                "flat dense size=xs"
+            ).classes("text-zinc-300").tooltip("Export XML (selected or all visible)")
 
             # Load saved AI Director story (in top bar only; available after using "Save Story" from AI Director results)
             ui.button(
-                "Load Story",
-                icon="upload_file",
-                on_click=_show_load_ai_director_story_dialog
-            ).props("flat dense size=xs").classes("text-zinc-300").tooltip("Load saved AI Director story (project/cut) for XML + Voiceover export")
+                "Load Story", icon="upload_file", on_click=_show_load_ai_director_story_dialog
+            ).props("flat dense size=xs").classes("text-zinc-300").tooltip(
+                "Load saved AI Director story (project/cut) for XML + Voiceover export"
+            )
 
             ui.separator().props("vertical").classes("mx-0.5 h-4")
 
             # Catalog Root (compact)
             state = get_state()
-            if state and getattr(state, 'catalog_root', None):
+            if state and getattr(state, "catalog_root", None):
                 catalog_text = str(state.catalog_root)
-                parts = catalog_text.rstrip('/').split('/')
-                short_path = '/'.join(parts[-2:]) if len(parts) > 1 else catalog_text
-                ui.label(short_path).classes("text-[10px] font-mono text-zinc-500").tooltip(catalog_text)
+                parts = catalog_text.rstrip("/").split("/")
+                short_path = "/".join(parts[-2:]) if len(parts) > 1 else catalog_text
+                ui.label(short_path).classes("text-[10px] font-mono text-zinc-500").tooltip(
+                    catalog_text
+                )
 
             ui.separator().props("vertical").classes("mx-0.5 h-4")
 
             # Utility actions
-            ui.button(icon="refresh", on_click=lambda: refresh_all_ui(get_state()) if get_state() else None).props("flat dense size=xs").classes("text-zinc-400").tooltip("Refresh")
+            ui.button(
+                icon="refresh",
+                on_click=lambda: refresh_all_ui(get_state()) if get_state() else None,
+            ).props("flat dense size=xs").classes("text-zinc-400").tooltip("Refresh")
 
-            ui.button(icon="settings", on_click=_open_settings_dialog).props("flat dense size=xs").classes("text-zinc-400").tooltip("Settings")
+            ui.button(icon="settings", on_click=_open_settings_dialog).props(
+                "flat dense size=xs"
+            ).classes("text-zinc-400").tooltip("Settings")
 
-            ui.button(icon="help_outline", on_click=_open_help_dialog).props("flat dense size=xs").classes("text-zinc-400").tooltip("Help")
+            ui.button(icon="help_outline", on_click=_open_help_dialog).props(
+                "flat dense size=xs"
+            ).classes("text-zinc-400").tooltip("Help")
 
 
 # --- Layer 3: Simple Refresh Registry ---
@@ -1728,16 +1904,17 @@ def refresh_all_ui(state: AppState) -> None:
 
     # Sync search
     try:
-        search_input = globals().get('_header_search_input')
+        search_input = globals().get("_header_search_input")
         if search_input:
             current_text = state.filters.text or ""
-            if getattr(search_input, 'value', None) != current_text:
+            if getattr(search_input, "value", None) != current_text:
                 search_input.value = current_text
     except Exception:
         pass
 
 
 # --- Layer 1: Delegated to ui/components/drawers.py ---
+
 
 def create_left_drawer() -> None:
     """Delegated to extracted drawers component."""
@@ -1758,9 +1935,13 @@ def create_right_drawer() -> None:
         if state.selected_ids or state.selected_project or state.selected:
             visible = True
 
-    with ui.right_drawer(value=visible, elevated=False).classes("q-pa-none border-l border-zinc-800/40").props("width=320 bordered") as drawer:
+    with (
+        ui.right_drawer(value=visible, elevated=False)
+        .classes("q-pa-none border-l border-zinc-800/40")
+        .props("width=320 bordered") as drawer
+    ):
         RIGHT_DRAWER = drawer
-        with ui.scroll_area().classes('px-4 py-2 flex flex-col gap-y-3 w-full h-full'):
+        with ui.scroll_area().classes("px-4 py-2 flex flex-col gap-y-3 w-full h-full"):
             inspector_content()
 
 
@@ -1826,13 +2007,19 @@ def _show_storyboard_dialog(video: Video) -> None:
     if not video.storyboard_path or not Path(video.storyboard_path).exists():
         ui.notify("No storyboard available for this clip", color="warning")
         return
-    with ui.dialog() as dialog, ui.card().classes("w-[92vw] max-w-[1200px] q-pa-none overflow-hidden"):
+    with (
+        ui.dialog() as dialog,
+        ui.card().classes("w-[92vw] max-w-[1200px] q-pa-none overflow-hidden"),
+    ):
         with ui.row().classes("items-center justify-between px-4 py-2 bg-[#111]"):
             ui.label(video.filename).classes("text-base font-medium")
             ui.button(icon="close", on_click=dialog.close).props("flat dense round")
         # Cap the displayed size so huge 4K-derived storyboards don't kill the UI
-        ui.image(str(video.storyboard_path)).classes("w-full").style("max-height: 70vh; object-fit: contain;")
+        ui.image(str(video.storyboard_path)).classes("w-full").style(
+            "max-height: 70vh; object-fit: contain;"
+        )
         with ui.row().classes("px-4 py-2 bg-[#111] justify-between"):
+
             def ask_ai_from_storyboard():
                 if not video.storyboard_path:
                     ui.notify("No storyboard available", color="warning")
@@ -1873,12 +2060,16 @@ def _show_storyboard_dialog(video: Video) -> None:
                 # Rich multi-select + editable review dialog (same experience as the inspector)
                 with ui.dialog() as sug_dialog, ui.card().classes("w-[520px]"):
                     ui.label("AI Suggested Tags").classes("text-h6 mb-2")
-                    ui.label("Review, edit, and select the tags you want to add").classes("text-xs text-grey-6 mb-3")
+                    ui.label("Review, edit, and select the tags you want to add").classes(
+                        "text-xs text-grey-6 mb-3"
+                    )
 
                     tag_items = [{"text": tag, "selected": True} for tag in suggestions]
 
                     def get_selected_count():
-                        return sum(1 for item in tag_items if item.get("selected") and item.get("text"))
+                        return sum(
+                            1 for item in tag_items if item.get("selected") and item.get("text")
+                        )
 
                     items_container = ui.column().classes("w-full gap-2 mb-2")
 
@@ -1889,15 +2080,18 @@ def _show_storyboard_dialog(video: Video) -> None:
                                 text = item.get("text") or ""
                                 with ui.row().classes("items-center gap-2 w-full py-0.5"):
                                     cb = ui.checkbox(
-                                        text or "(empty tag)",
-                                        value=bool(item.get("selected"))
+                                        text or "(empty tag)", value=bool(item.get("selected"))
                                     ).props("dense")
 
                                     def make_cb_handler(i=idx):
                                         def handler(e):
-                                            tag_items[i]["selected"] = bool(getattr(e, "value", False))
+                                            tag_items[i]["selected"] = bool(
+                                                getattr(e, "value", False)
+                                            )
                                             update_add_button()
+
                                         return handler
+
                                     cb.on_value_change(make_cb_handler())
 
                                     def edit_item(i=idx):
@@ -1915,9 +2109,12 @@ def _show_storyboard_dialog(video: Video) -> None:
                                                         update_add_button()
                                             except Exception as ex:
                                                 ui.notify(f"Could not edit: {ex}", color="negative")
+
                                         asyncio.create_task(do_edit())
 
-                                    ui.button(icon="edit", on_click=edit_item).props("flat dense size=sm color=grey-7")
+                                    ui.button(icon="edit", on_click=edit_item).props(
+                                        "flat dense size=sm color=grey-7"
+                                    )
 
                                     def delete_item(i=idx):
                                         if 0 <= i < len(tag_items):
@@ -1925,11 +2122,20 @@ def _show_storyboard_dialog(video: Video) -> None:
                                             refresh_items()
                                             update_add_button()
 
-                                    ui.button(icon="delete", on_click=delete_item).props("flat dense size=sm color=grey-7")
+                                    ui.button(icon="delete", on_click=delete_item).props(
+                                        "flat dense size=sm color=grey-7"
+                                    )
 
                             # Add your own tag
-                            with ui.row().classes("items-center gap-2 w-full mt-2 pt-2 border-t border-grey-8"):
-                                custom_input = ui.input(placeholder="Add your own tag...").props("dense").classes("flex-1")
+                            with ui.row().classes(
+                                "items-center gap-2 w-full mt-2 pt-2 border-t border-grey-8"
+                            ):
+                                custom_input = (
+                                    ui.input(placeholder="Add your own tag...")
+                                    .props("dense")
+                                    .classes("flex-1")
+                                )
+
                                 def add_custom():
                                     val = (custom_input.value or "").strip().lower()
                                     if val:
@@ -1937,7 +2143,10 @@ def _show_storyboard_dialog(video: Video) -> None:
                                         custom_input.value = ""
                                         refresh_items()
                                         update_add_button()
-                                ui.button("Add", on_click=add_custom, color="primary").props("dense size=sm")
+
+                                ui.button("Add", on_click=add_custom, color="primary").props(
+                                    "dense size=sm"
+                                )
 
                     refresh_items()
 
@@ -1949,9 +2158,7 @@ def _show_storyboard_dialog(video: Video) -> None:
                             ui.button("Cancel", on_click=sug_dialog.close).props("flat")
                             count = get_selected_count()
                             add_btn = ui.button(
-                                f"Add Selected ({count})",
-                                on_click=apply_tags,
-                                color="primary"
+                                f"Add Selected ({count})", on_click=apply_tags, color="primary"
                             )
                             if count == 0:
                                 add_btn.props("disable")
@@ -1960,7 +2167,11 @@ def _show_storyboard_dialog(video: Video) -> None:
                         if not video.id:
                             sug_dialog.close()
                             return
-                        selected = [item["text"] for item in tag_items if item.get("selected") and item.get("text")]
+                        selected = [
+                            item["text"]
+                            for item in tag_items
+                            if item.get("selected") and item.get("text")
+                        ]
                         if not selected:
                             sug_dialog.close()
                             return
@@ -1979,32 +2190,41 @@ def _show_storyboard_dialog(video: Video) -> None:
                             if not current_state:
                                 return (False, None)
 
-                            current = set(getattr(video, 'tags', None) or [])
+                            current = set(getattr(video, "tags", None) or [])
                             new_tags = current | set(selected)
 
                             # Aggressive retry for manual "Add Selected" (user is actively waiting)
                             write_succeeded = False
                             for attempt in range(15):  # more attempts for manual action
                                 try:
-                                    db.set_video_tags(current_state.catalog_root, video.id, list(new_tags))
+                                    db.set_video_tags(
+                                        current_state.catalog_root, video.id, list(new_tags)
+                                    )
                                     write_succeeded = True
                                     break
                                 except Exception as db_err:
                                     err_lower = str(db_err).lower()
                                     if "locked" in err_lower or "busy" in err_lower:
                                         import time
+
                                         time.sleep(0.12 * (attempt + 1))  # slightly longer backoff
                                         continue
                                     raise
 
                             if not write_succeeded:
-                                print(f"[AI Tags] Warning: Could not write tags for {video.filename} after retries")
+                                print(
+                                    f"[AI Tags] Warning: Could not write tags for {video.filename} after retries"
+                                )
 
-                            fresh_video = db.get_video_by_path(current_state.catalog_root, video.path)
+                            fresh_video = db.get_video_by_path(
+                                current_state.catalog_root, video.path
+                            )
                             if fresh_video:
                                 video.tags = fresh_video.tags
                                 current_state.selected = fresh_video
-                                current_state.selected_ids = {fresh_video.id} if fresh_video.id else set()
+                                current_state.selected_ids = (
+                                    {fresh_video.id} if fresh_video.id else set()
+                                )
                             return (write_succeeded, current_state)
 
                         # Offload the DB work
@@ -2027,12 +2247,14 @@ def _show_storyboard_dialog(video: Video) -> None:
                                 if write_succeeded:
                                     ui.notify(
                                         f"Added {len(selected)} tag(s). The clip is selected — look at the inspector and the small tag chips under the card.",
-                                        color="positive", duration=6
+                                        color="positive",
+                                        duration=6,
                                     )
                                 else:
                                     ui.notify(
                                         "Failed to save tags after many attempts (database busy). Wait 5–10 seconds and try again.",
-                                        color="negative", duration=10
+                                        color="negative",
+                                        duration=10,
                                     )
                             except Exception as e:
                                 print(f"[AI Tags] Error in final UI: {e}")
@@ -2054,14 +2276,20 @@ def _show_storyboard_dialog(video: Video) -> None:
                     update_add_button()
 
                     with ui.row().classes("justify-between w-full mt-3"):
-                        ui.button("Select All", on_click=select_all, color="primary").props("outline size=sm")
+                        ui.button("Select All", on_click=select_all, color="primary").props(
+                            "outline size=sm"
+                        )
                         ui.button("Deselect All", on_click=deselect_all).props("flat size=sm")
 
                 sug_dialog.open()
 
-            ui.button("Ask AI for tags", icon="auto_awesome", on_click=ask_ai_from_storyboard).props("size=sm outline")
+            ui.button(
+                "Ask AI for tags", icon="auto_awesome", on_click=ask_ai_from_storyboard
+            ).props("size=sm outline")
 
-            ui.button("Rebuild Previews", on_click=lambda: (_rebuild_and_refresh_storyboard(video, dialog))).props("size=sm outline")
+            ui.button(
+                "Rebuild Previews", on_click=lambda: _rebuild_and_refresh_storyboard(video, dialog)
+            ).props("size=sm outline")
     dialog.open()
 
 
@@ -2114,6 +2342,7 @@ def _play_current_from_card(video: Video) -> None:
 # Header action helpers (safe to call from static header buttons via get_state)
 # ---------------------------------------------------------------------------
 
+
 def _header_set_view_mode(mode: str) -> None:
     """Set grid/list view from the top bar (icon-only buttons)."""
     state = get_state()
@@ -2133,13 +2362,38 @@ def _set_media_view_filter(mode: str) -> None:
 # List view column configuration (for drag-to-reorder + visibility)
 # ---------------------------------------------------------------------------
 
+
 def _get_all_list_columns() -> list[dict]:
     """Returns the canonical list of all available columns for the list view."""
     return [
-        {"name": "selected", "label": "", "field": "selected", "align": "center", "sortable": False},
-        {"name": "filename", "label": "Filename", "field": "filename", "align": "left", "sortable": False},
-        {"name": "date", "label": "Shoot Date", "field": "date", "align": "left", "sortable": False},
-        {"name": "length", "label": "Length", "field": "length", "align": "left", "sortable": False},
+        {
+            "name": "selected",
+            "label": "",
+            "field": "selected",
+            "align": "center",
+            "sortable": False,
+        },
+        {
+            "name": "filename",
+            "label": "Filename",
+            "field": "filename",
+            "align": "left",
+            "sortable": False,
+        },
+        {
+            "name": "date",
+            "label": "Shoot Date",
+            "field": "date",
+            "align": "left",
+            "sortable": False,
+        },
+        {
+            "name": "length",
+            "label": "Length",
+            "field": "length",
+            "align": "left",
+            "sortable": False,
+        },
         {"name": "codec", "label": "Codec", "field": "codec", "align": "left"},
         {"name": "resolution", "label": "Resolution", "field": "resolution", "align": "left"},
         {"name": "camera", "label": "Camera", "field": "camera", "align": "left"},
@@ -2151,8 +2405,18 @@ def _get_all_list_columns() -> list[dict]:
         {"name": "focal", "label": "Focal", "field": "focal", "align": "left"},
         {"name": "wb", "label": "WB", "field": "wb", "align": "left"},
         {"name": "gamma", "label": "Gamma", "field": "gamma", "align": "left"},
-        {"name": "color_primaries", "label": "Color Primaries", "field": "color_primaries", "align": "left"},
-        {"name": "coding_equations", "label": "Coding Eqs", "field": "coding_equations", "align": "left"},
+        {
+            "name": "color_primaries",
+            "label": "Color Primaries",
+            "field": "color_primaries",
+            "align": "left",
+        },
+        {
+            "name": "coding_equations",
+            "label": "Coding Eqs",
+            "field": "coding_equations",
+            "align": "left",
+        },
         {"name": "location", "label": "Location", "field": "location", "align": "left"},
         {"name": "tags", "label": "Tags", "field": "tags", "align": "left"},
         {"name": "tc_start", "label": "TC Start", "field": "tc_start", "align": "left"},
@@ -2200,7 +2464,9 @@ def _show_list_column_customizer(state: AppState) -> None:
 
     with ui.dialog() as dialog, ui.card().classes("w-[540px]"):
         ui.label("Customize List Columns").classes("text-h6 mb-1")
-        ui.label("Use the arrows to reorder. Check the box to show or hide a column.").classes("text-xs text-grey-6 mb-3")
+        ui.label("Use the arrows to reorder. Check the box to show or hide a column.").classes(
+            "text-xs text-grey-6 mb-3"
+        )
 
         column_list = ui.column().classes("w-full gap-1")
 
@@ -2215,13 +2481,28 @@ def _show_list_column_customizer(state: AppState) -> None:
                     is_visible = name in visible
 
                     with ui.row().classes("items-center w-full px-2 py-1 bg-[#1f1f23] rounded"):
-                        ui.checkbox(value=is_visible, on_change=lambda e, n=name: _toggle_column_visibility(n, visible, state)).props("dense")
+                        ui.checkbox(
+                            value=is_visible,
+                            on_change=lambda e, n=name: _toggle_column_visibility(
+                                n, visible, state
+                            ),
+                        ).props("dense")
 
                         ui.label(col_def.get("label") or name).classes("flex-1 text-sm")
 
                         # Move up / down buttons (reliable reordering)
-                        ui.button(icon="arrow_upward", on_click=lambda i=idx: _move_column(i, -1, current_order, refresh_column_list)).props("flat dense size=xs")
-                        ui.button(icon="arrow_downward", on_click=lambda i=idx: _move_column(i, 1, current_order, refresh_column_list)).props("flat dense size=xs")
+                        ui.button(
+                            icon="arrow_upward",
+                            on_click=lambda i=idx: _move_column(
+                                i, -1, current_order, refresh_column_list
+                            ),
+                        ).props("flat dense size=xs")
+                        ui.button(
+                            icon="arrow_downward",
+                            on_click=lambda i=idx: _move_column(
+                                i, 1, current_order, refresh_column_list
+                            ),
+                        ).props("flat dense size=xs")
 
         refresh_column_list()
 
@@ -2233,7 +2514,12 @@ def _show_list_column_customizer(state: AppState) -> None:
                 main_content.refresh()
 
         with ui.row().classes("justify-end gap-2 mt-4 w-full"):
-            ui.button("Reset to Default", on_click=lambda: _reset_list_columns(state, dialog, current_order, visible, refresh_column_list)).props("flat")
+            ui.button(
+                "Reset to Default",
+                on_click=lambda: _reset_list_columns(
+                    state, dialog, current_order, visible, refresh_column_list
+                ),
+            ).props("flat")
             ui.button("Cancel", on_click=dialog.close).props("flat")
             ui.button("Apply", on_click=apply_changes, color="primary")
 
@@ -2304,6 +2590,7 @@ def _header_export_xml() -> None:
 # Settings
 # ---------------------------------------------------------------------------
 
+
 def _open_settings_dialog() -> None:
     """Open the application settings dialog with multiple pages."""
     current_page = "general"
@@ -2342,10 +2629,14 @@ def _open_settings_dialog() -> None:
                             btn.classes(remove="bg-zinc-800")
 
                 for page_id, label in nav_items:
-                    btn = ui.button(
-                        label,
-                        on_click=lambda p=page_id: switch_page(p),
-                    ).props("flat").classes("w-full justify-start text-sm")
+                    btn = (
+                        ui.button(
+                            label,
+                            on_click=lambda p=page_id: switch_page(p),
+                        )
+                        .props("flat")
+                        .classes("w-full justify-start text-sm")
+                    )
                     if page_id == "general":
                         btn.props("color=primary")
                         btn.classes("bg-zinc-800")
@@ -2392,7 +2683,7 @@ def _render_general_settings(container: ui.element) -> None:
         ui.checkbox(
             "Use macOS Quick Look for video playback",
             value=use_quicklook,
-            on_change=lambda e: save_quicklook(e.value)
+            on_change=lambda e: save_quicklook(e.value),
         ).classes("mb-1")
 
         ui.label(
@@ -2404,10 +2695,13 @@ def _render_general_settings(container: ui.element) -> None:
         ui.label("Advanced Tools").classes("text-base font-semibold mt-4 mb-2")
 
         from minicat.core import video as video_core
+
         exif_available = video_core.is_exiftool_available()
 
         if exif_available:
-            ui.label("✓ ExifTool detected — deep metadata extraction enabled for Fuji, Nikon, GoPro, DJI, Blackmagic, etc.").classes("text-sm text-positive")
+            ui.label(
+                "✓ ExifTool detected — deep metadata extraction enabled for Fuji, Nikon, GoPro, DJI, Blackmagic, etc."
+            ).classes("text-sm text-positive")
         else:
             ui.label("ExifTool not found").classes("text-sm text-grey-6")
             ui.label(
@@ -2425,10 +2719,14 @@ def _render_general_settings(container: ui.element) -> None:
 
         current_export_dir = str(get_default_export_directory())
 
-        export_dir_input = ui.input(
-            "Default folder",
-            value=current_export_dir,
-        ).props("dense").classes("w-full mb-2")
+        export_dir_input = (
+            ui.input(
+                "Default folder",
+                value=current_export_dir,
+            )
+            .props("dense")
+            .classes("w-full mb-2")
+        )
 
         def _on_export_dir_change(e):
             try:
@@ -2449,14 +2747,17 @@ def _render_general_settings(container: ui.element) -> None:
             export_dir_input.update()
 
         with ui.row().classes("gap-2 mb-2"):
+
             def choose_export_dir():
                 try:
                     import webview
-                    win = webview.active_window() or (webview.windows[0] if webview.windows else None)
+
+                    win = webview.active_window() or (
+                        webview.windows[0] if webview.windows else None
+                    )
                     if win:
                         result = win.create_file_dialog(
-                            webview.FileDialog.FOLDER,
-                            allow_multiple=False
+                            webview.FileDialog.FOLDER, allow_multiple=False
                         )
                         if result:
                             chosen = result[0] if isinstance(result, (list, tuple)) else result
@@ -2466,12 +2767,17 @@ def _render_general_settings(container: ui.element) -> None:
                             ui.notify(f"Default export folder set to {new_path}", color="positive")
                     else:
                         # Fallback: just let user edit the field manually
-                        ui.notify("Could not open native folder picker. You can paste a path directly into the field.", color="warning")
+                        ui.notify(
+                            "Could not open native folder picker. You can paste a path directly into the field.",
+                            color="warning",
+                        )
                 except Exception as e:
                     ui.notify(f"Folder picker unavailable: {e}", color="warning")
                     print(f"[Settings] Export dir picker error: {e}")
 
-            ui.button("Choose Folder...", icon="folder_open", on_click=choose_export_dir, color="primary").props("size=sm")
+            ui.button(
+                "Choose Folder...", icon="folder_open", on_click=choose_export_dir, color="primary"
+            ).props("size=sm")
 
             def reset_export_dir():
                 # Reset to the current canonical default (~/CAT+TAG/Exports)
@@ -2480,7 +2786,9 @@ def _render_general_settings(container: ui.element) -> None:
                 _refresh_export_dir_display(new_path)
                 ui.notify("Reset to ~/CAT+TAG/Exports", color="positive")
 
-            ui.button("Reset to default", icon="refresh", on_click=reset_export_dir).props("size=sm outline")
+            ui.button("Reset to default", icon="refresh", on_click=reset_export_dir).props(
+                "size=sm outline"
+            )
 
         ui.label(
             "Tip: You can also manually paste a path into the field above and press Enter (changes are saved immediately on picker use)."
@@ -2500,13 +2808,19 @@ def _render_proxy_settings(container: ui.element) -> None:
         cur_burn_tc = get_proxy_default_burn_timecode()
         cur_burn_subs = get_proxy_default_burn_subtitles()
 
-        p_preset = ui.select(
-            options=PROXY_PRESETS,
-            value=cur_preset if cur_preset in PROXY_PRESETS else PROXY_PRESETS[0],
-            label="Default Proxy Profile",
-        ).props("dense").classes("w-full mb-3")
+        p_preset = (
+            ui.select(
+                options=PROXY_PRESETS,
+                value=cur_preset if cur_preset in PROXY_PRESETS else PROXY_PRESETS[0],
+                label="Default Proxy Profile",
+            )
+            .props("dense")
+            .classes("w-full mb-3")
+        )
 
-        p_burn_tc = ui.checkbox("Burn original timecode by default", value=cur_burn_tc).classes("mb-1")
+        p_burn_tc = ui.checkbox("Burn original timecode by default", value=cur_burn_tc).classes(
+            "mb-1"
+        )
         p_burn_subs = ui.checkbox("Burn subtitles by default", value=cur_burn_subs).classes("mb-3")
 
         def _save_proxy_defaults():
@@ -2515,7 +2829,9 @@ def _render_proxy_settings(container: ui.element) -> None:
             set_proxy_default_burn_subtitles(bool(p_burn_subs.value))
             ui.notify("Proxy defaults saved", color="positive")
 
-        ui.button("Save Proxy Defaults", on_click=_save_proxy_defaults, color="primary").props("size=sm").classes("mb-1")
+        ui.button("Save Proxy Defaults", on_click=_save_proxy_defaults, color="primary").props(
+            "size=sm"
+        ).classes("mb-1")
 
 
 def _render_ai_settings(container: ui.element) -> None:
@@ -2524,35 +2840,49 @@ def _render_ai_settings(container: ui.element) -> None:
         # Security notice for API key
         env_key = os.getenv("GEMINI_API_KEY")
         if env_key:
-            ui.label("✓ Using GEMINI_API_KEY from environment (.env or system env). Stored key is ignored.").classes("text-positive text-sm mb-2")
+            ui.label(
+                "✓ Using GEMINI_API_KEY from environment (.env or system env). Stored key is ignored."
+            ).classes("text-positive text-sm mb-2")
         else:
-            ui.label("For better security, set GEMINI_API_KEY in a .env file instead of storing it here.").classes("text-warning text-sm mb-2")
+            ui.label(
+                "For better security, set GEMINI_API_KEY in a .env file instead of storing it here."
+            ).classes("text-warning text-sm mb-2")
 
         # AI Tag Suggestions (Gemini)
         ui.label("AI Tag Suggestions (Gemini)").classes("text-base font-semibold mt-1 mb-2")
 
         current_key = get_gemini_api_key() or "" if not env_key else ""
 
-        gemini_key_input = ui.input(
-            "Gemini API Key",
-            value=current_key,
-            placeholder="AIzaSy...",
-            password=True,
-        ).props("dense").classes("w-full mb-1")
+        gemini_key_input = (
+            ui.input(
+                "Gemini API Key",
+                value=current_key,
+                placeholder="AIzaSy...",
+                password=True,
+            )
+            .props("dense")
+            .classes("w-full mb-1")
+        )
 
         def save_gemini_key():
             if os.getenv("GEMINI_API_KEY"):
-                ui.notify("Cannot save key while GEMINI_API_KEY is set in environment", color="warning")
+                ui.notify(
+                    "Cannot save key while GEMINI_API_KEY is set in environment", color="warning"
+                )
                 return
 
             key = gemini_key_input.value.strip() or None
             set_gemini_api_key(key)
             if key:
-                ui.notify("Gemini API key saved (consider moving to .env for security)", color="positive")
+                ui.notify(
+                    "Gemini API key saved (consider moving to .env for security)", color="positive"
+                )
             else:
                 ui.notify("Gemini API key cleared", color="warning")
 
-        ui.button("Save Key", on_click=save_gemini_key, color="primary").props("size=sm").classes("mb-1")
+        ui.button("Save Key", on_click=save_gemini_key, color="primary").props("size=sm").classes(
+            "mb-1"
+        )
 
         test_result = ui.label("").classes("text-sm mb-2")
 
@@ -2568,11 +2898,13 @@ def _render_ai_settings(container: ui.element) -> None:
 
             def _do_test():
                 from google import genai
+
                 client = genai.Client(api_key=key)
                 list(client.models.list())
 
             try:
                 import asyncio
+
                 await asyncio.to_thread(_do_test)
                 test_result.set_text("✓ API key is valid!")
                 test_result.classes(replace="text-sm text-positive mb-2")
@@ -2580,24 +2912,32 @@ def _render_ai_settings(container: ui.element) -> None:
                 test_result.set_text(f"✗ {str(e)}")
                 test_result.classes(replace="text-sm text-negative mb-2")
 
-        ui.button("Test API Key", on_click=test_gemini_key, color="primary").props("size=sm outline").classes("mb-3")
+        ui.button("Test API Key", on_click=test_gemini_key, color="primary").props(
+            "size=sm outline"
+        ).classes("mb-3")
 
         current_model = get_gemini_model()
         if current_model not in GEMINI_MODELS:
             current_model = DEFAULT_GEMINI_MODEL
             set_gemini_model(current_model)
 
-        model_select = ui.select(
-            options=GEMINI_MODELS,
-            value=current_model,
-            label="Gemini Model",
-        ).props("dense").classes("w-full mb-1")
+        model_select = (
+            ui.select(
+                options=GEMINI_MODELS,
+                value=current_model,
+                label="Gemini Model",
+            )
+            .props("dense")
+            .classes("w-full mb-1")
+        )
 
         def save_model():
             set_gemini_model(model_select.value)
             ui.notify(f"Model set to {model_select.value}", color="positive")
 
-        ui.button("Save Model", on_click=save_model, color="primary").props("size=sm").classes("mb-2")
+        ui.button("Save Model", on_click=save_model, color="primary").props("size=sm").classes(
+            "mb-2"
+        )
 
         ui.label(
             "gemini-2.5-flash = best balance (recommended)\n"
@@ -2610,12 +2950,18 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
     """Text-to-Speech settings (voiceovers / narrations for AI Director and AI Journalist cuts)."""
     # TTS-related settings imports
     from minicat.core.settings import (
-        get_tts_provider, set_tts_provider,
-        get_tts_default_language, set_tts_default_language,
-        get_tts_google_default_voice, set_tts_google_default_voice,
-        get_tts_voice, set_tts_voice,
-        get_preference, clean_tts_voice, clean_tts_language,
-        get_gcp_credentials_path, set_gcp_credentials_path,
+        clean_tts_language,
+        clean_tts_voice,
+        get_gcp_credentials_path,
+        get_preference,
+        get_tts_default_language,
+        get_tts_provider,
+        get_tts_voice,
+        set_gcp_credentials_path,
+        set_tts_default_language,
+        set_tts_google_default_voice,
+        set_tts_provider,
+        set_tts_voice,
     )
 
     with container:
@@ -2633,11 +2979,15 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
             "local": "Piper TTS - fully offline, no cloud, recommended",
             "google": "Google Cloud TTS - Wavenet/Standard - requires login",
         }
-        provider_select = ui.select(
-            options=provider_options,
-            value=current_provider if current_provider in provider_options else "local",
-            label="TTS Provider",
-        ).props("dense").classes("w-full mb-2")
+        provider_select = (
+            ui.select(
+                options=provider_options,
+                value=current_provider if current_provider in provider_options else "local",
+                label="TTS Provider",
+            )
+            .props("dense")
+            .classes("w-full mb-2")
+        )
 
         # Live status + provider-specific action area
         status_label = ui.label().classes("text-sm mb-1")
@@ -2651,7 +3001,7 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
         google_creds_container = ui.column().classes("mt-1 mb-2 hidden")
 
         lang_select = None
-        voice_select = None   # renamed from google_voice_select to be provider-agnostic
+        voice_select = None  # renamed from google_voice_select to be provider-agnostic
         save_btn = None
         test_btn = None
 
@@ -2677,21 +3027,31 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
                     if prov == "local":
                         status_label.set_text("✓ Local offline TTS ready to go (Piper)")
                         status_label.classes(replace="text-sm text-positive mb-1")
-                        help_label.set_text("Pick language + voice below. Models are downloaded automatically on first use.")
+                        help_label.set_text(
+                            "Pick language + voice below. Models are downloaded automatically on first use."
+                        )
                         help_label.classes(replace="text-xs text-grey-6 mb-2")
                     else:
-                        status_label.set_text("✓ Google Cloud TTS ready — voiceover generation enabled (WaveNet/Standard, 4M free tier).")
+                        status_label.set_text(
+                            "✓ Google Cloud TTS ready — voiceover generation enabled (WaveNet/Standard, 4M free tier)."
+                        )
                         status_label.classes(replace="text-sm text-positive mb-1")
-                        help_label.set_text("Ready for voiceovers. Set language + voice below and Save. Test uses a natural sentence in the selected language.")
+                        help_label.set_text(
+                            "Ready for voiceovers. Set language + voice below and Save. Test uses a natural sentence in the selected language."
+                        )
                         help_label.classes(replace="text-xs text-grey-6 mb-2")
                 else:
                     status_label.set_text(st.get("message", "Not ready"))
                     status_label.classes(replace="text-sm text-grey-6 mb-1")
                     if prov == "local":
-                        help_label.set_text("Piper will auto-install on first use / status check. Use 'Prepare / Update voices' button below to pre-download models (or if it still shows offline, run 'uv pip install piper-tts' then Check Status).")
+                        help_label.set_text(
+                            "Piper will auto-install on first use / status check. Use 'Prepare / Update voices' button below to pre-download models (or if it still shows offline, run 'uv pip install piper-tts' then Check Status)."
+                        )
                         help_label.classes(replace="text-xs text-grey-5 mb-2")
                     else:
-                        help_label.set_text("Click 'Log in with Google' below, complete the browser flow, then 'Check Status'.")
+                        help_label.set_text(
+                            "Click 'Log in with Google' below, complete the browser flow, then 'Check Status'."
+                        )
                         help_label.classes(replace="text-xs text-grey-5 mb-2")
             except Exception as st_err:
                 status_label.set_text("TTS status check failed")
@@ -2706,12 +3066,21 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
             prov = _get_current_provider()
             with action_row_container:
                 if prov == "local":
+
                     def prepare_local_voices():
                         try:
                             # Allow fresh install attempt (in case previous auto-install failed or user did manual)
                             reset_piper_install_flag()
-                            lang = clean_tts_language((lang_select.value if lang_select else "en") or "en") or "en"
-                            ui.notify(f"Preparing offline voice for {lang} ... (first time downloads ~30-80 MB)", color="info")
+                            lang = (
+                                clean_tts_language(
+                                    (lang_select.value if lang_select else "en") or "en"
+                                )
+                                or "en"
+                            )
+                            ui.notify(
+                                f"Preparing offline voice for {lang} ... (first time downloads ~30-80 MB)",
+                                color="info",
+                            )
 
                             def _do_prep():
                                 if not ensure_piper_package():
@@ -2723,6 +3092,7 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
                                 return p
 
                             import concurrent.futures
+
                             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                                 fut = pool.submit(_do_prep)
                                 model_path = fut.result()
@@ -2732,9 +3102,22 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
                             ui.notify(f"Voice preparation failed: {ex}", color="negative")
                             print(f"[Piper] {ex}")
 
-                    ui.button("Prepare / Update voices for current language", on_click=prepare_local_voices, color="primary").props("size=sm")
-                    ui.button("Check Status", on_click=lambda: (_refresh_tts_status(), ui.notify("Local TTS status refreshed", color="info")), color="secondary").props("size=sm outline")
-                    extra_help_label.set_text("Completely offline after download. No Google account or internet needed for generation.")
+                    ui.button(
+                        "Prepare / Update voices for current language",
+                        on_click=prepare_local_voices,
+                        color="primary",
+                    ).props("size=sm")
+                    ui.button(
+                        "Check Status",
+                        on_click=lambda: (
+                            _refresh_tts_status(),
+                            ui.notify("Local TTS status refreshed", color="info"),
+                        ),
+                        color="secondary",
+                    ).props("size=sm outline")
+                    extra_help_label.set_text(
+                        "Completely offline after download. No Google account or internet needed for generation."
+                    )
                 else:
                     # Google Cloud path - make it easy even if gcloud CLI is missing
                     gcloud_bin = find_gcloud()
@@ -2742,13 +3125,17 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
                     def do_launch_google_auth():
                         try:
                             if not gcloud_bin:
-                                ui.notify("gcloud CLI not detected — use the buttons below to install it or pick a credentials file instead.", color="warning")
+                                ui.notify(
+                                    "gcloud CLI not detected — use the buttons below to install it or pick a credentials file instead.",
+                                    color="warning",
+                                )
                                 return
                             run_gcloud_auth_application_default()
                             ui.notify(
                                 "Browser opened for Google login.\n"
                                 "Complete the steps there, then return and click 'Check Status'.",
-                                color="info", multi_line=True
+                                color="info",
+                                multi_line=True,
                             )
                         except Exception as auth_ex:
                             ui.notify(f"Auth launch failed: {auth_ex}", color="negative")
@@ -2761,53 +3148,96 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
                             _refresh_tts_status()
                             _rebuild_google_creds_ui()
                             if ready:
-                                if lang_select: lang_select.enable()
-                                if voice_select: voice_select.enable()
-                                if save_btn: save_btn.enable()
-                                if test_btn: test_btn.enable()
-                                ui.notify("✓ Google Cloud TTS ready — controls enabled.", color="positive")
+                                if lang_select:
+                                    lang_select.enable()
+                                if voice_select:
+                                    voice_select.enable()
+                                if save_btn:
+                                    save_btn.enable()
+                                if test_btn:
+                                    test_btn.enable()
+                                ui.notify(
+                                    "✓ Google Cloud TTS ready — controls enabled.", color="positive"
+                                )
                             else:
-                                ui.notify(new_status.get("message", "Still not ready."), color="warning")
+                                ui.notify(
+                                    new_status.get("message", "Still not ready."), color="warning"
+                                )
                         except Exception as chk_ex:
                             ui.notify(f"Check failed: {chk_ex}", color="negative")
 
                     if gcloud_bin:
-                        ui.button("🔑 Log in with Google (gcloud auth)", on_click=do_launch_google_auth, color="primary").props("size=sm")
+                        ui.button(
+                            "🔑 Log in with Google (gcloud auth)",
+                            on_click=do_launch_google_auth,
+                            color="primary",
+                        ).props("size=sm")
                     else:
                         # gcloud missing - offer easy ways to get it or bypass it completely
                         def open_install_page():
                             import webbrowser
+
                             webbrowser.open("https://cloud.google.com/sdk/docs/install")
 
-                        ui.button("Open gcloud install instructions", on_click=open_install_page, color="secondary").props("size=sm outline")
+                        ui.button(
+                            "Open gcloud install instructions",
+                            on_click=open_install_page,
+                            color="secondary",
+                        ).props("size=sm outline")
 
                         if shutil.which("brew"):
+
                             def install_gcloud_brew():
                                 def _run():
                                     try:
-                                        ui.notify("Installing google-cloud-sdk via Homebrew (this can take a minute)...", color="info")
+                                        ui.notify(
+                                            "Installing google-cloud-sdk via Homebrew (this can take a minute)...",
+                                            color="info",
+                                        )
                                         result = subprocess.run(
                                             ["brew", "install", "google-cloud-sdk"],
-                                            capture_output=True, text=True, timeout=300
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=300,
                                         )
                                         if result.returncode == 0:
-                                            ui.notify("gcloud installed! Click 'Check Status' below.", color="positive")
+                                            ui.notify(
+                                                "gcloud installed! Click 'Check Status' below.",
+                                                color="positive",
+                                            )
                                             # Give the shell/brew a moment
-                                            import time; time.sleep(1.0)
+                                            import time
+
+                                            time.sleep(1.0)
                                         else:
-                                            ui.notify("brew install finished with warnings. Try 'Check Status'.", color="warning")
+                                            ui.notify(
+                                                "brew install finished with warnings. Try 'Check Status'.",
+                                                color="warning",
+                                            )
                                     except Exception as ex:
-                                        ui.notify(f"Homebrew install failed: {ex}", color="negative")
+                                        ui.notify(
+                                            f"Homebrew install failed: {ex}", color="negative"
+                                        )
                                     # always refresh so the login button may appear
                                     _refresh_tts_status()
                                     _rebuild_provider_actions()
+
                                 import threading
+
                                 threading.Thread(target=_run, daemon=True).start()
 
-                            ui.button("Install gcloud via Homebrew", on_click=install_gcloud_brew, color="primary").props("size=sm")
+                            ui.button(
+                                "Install gcloud via Homebrew",
+                                on_click=install_gcloud_brew,
+                                color="primary",
+                            ).props("size=sm")
 
-                    ui.button("Check Status", on_click=check_google_and_enable, color="secondary").props("size=sm outline")
-                    extra_help_label.set_text("Tip: the 'Check Status' button also works if you previously logged in via terminal or set a credentials file below.")
+                    ui.button(
+                        "Check Status", on_click=check_google_and_enable, color="secondary"
+                    ).props("size=sm outline")
+                    extra_help_label.set_text(
+                        "Tip: the 'Check Status' button also works if you previously logged in via terminal or set a credentials file below."
+                    )
 
         def _rebuild_google_creds_ui():
             """Show/hide and populate a credentials file picker that lets users authenticate
@@ -2819,40 +3249,55 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
                 return
             google_creds_container.classes(remove="hidden")
             with google_creds_container:
-                ui.label("Alternative: use a credentials file (no gcloud CLI needed)").classes("text-sm font-semibold mt-1")
+                ui.label("Alternative: use a credentials file (no gcloud CLI needed)").classes(
+                    "text-sm font-semibold mt-1"
+                )
                 current_creds = get_gcp_credentials_path() or ""
-                creds_input = ui.input(
-                    "Service account key JSON path",
-                    value=current_creds,
-                    placeholder="Select or paste path to your Google Cloud JSON key...",
-                ).props("dense").classes("w-full mb-1")
+                creds_input = (
+                    ui.input(
+                        "Service account key JSON path",
+                        value=current_creds,
+                        placeholder="Select or paste path to your Google Cloud JSON key...",
+                    )
+                    .props("dense")
+                    .classes("w-full mb-1")
+                )
 
                 def browse_creds():
                     try:
                         import tkinter as tk
                         from tkinter import filedialog
+
                         root = tk.Tk()
                         root.withdraw()
                         root.attributes("-topmost", True)
                         path = filedialog.askopenfilename(
                             title="Select Google Cloud credentials JSON",
-                            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+                            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
                         )
                         root.destroy()
                         if path:
                             creds_input.value = path
                     except Exception as ex:
-                        ui.notify(f"Could not open file dialog: {ex}. Paste the full path instead.", color="warning")
+                        ui.notify(
+                            f"Could not open file dialog: {ex}. Paste the full path instead.",
+                            color="warning",
+                        )
 
                 with ui.row().classes("gap-2 mb-1"):
-                    ui.button("Browse...", on_click=browse_creds, color="secondary").props("size=sm outline")
+                    ui.button("Browse...", on_click=browse_creds, color="secondary").props(
+                        "size=sm outline"
+                    )
 
                     def save_creds_path():
                         val = (creds_input.value or "").strip()
                         try:
                             if val:
                                 set_gcp_credentials_path(val)
-                                ui.notify("Credentials file saved and will be used for TTS.", color="positive")
+                                ui.notify(
+                                    "Credentials file saved and will be used for TTS.",
+                                    color="positive",
+                                )
                             else:
                                 set_gcp_credentials_path(None)
                                 ui.notify("Cleared explicit credentials.", color="positive")
@@ -2860,7 +3305,9 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
                             ui.notify(str(ex), color="negative")
                         _refresh_tts_status()
 
-                    ui.button("Save / Activate", on_click=save_creds_path, color="primary").props("size=sm")
+                    ui.button("Save / Activate", on_click=save_creds_path, color="primary").props(
+                        "size=sm"
+                    )
 
                     def clear_creds():
                         creds_input.value = ""
@@ -2868,7 +3315,9 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
                         _refresh_tts_status()
                         ui.notify("Credentials cleared.", color="positive")
 
-                    ui.button("Clear", on_click=clear_creds, color="secondary").props("size=sm outline")
+                    ui.button("Clear", on_click=clear_creds, color="secondary").props(
+                        "size=sm outline"
+                    )
 
                 ui.label(
                     "How to get a key: Google Cloud Console → IAM & Admin → Service Accounts → Create key (JSON). "
@@ -2917,14 +3366,18 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
             set_tts_provider(_get_current_provider())
             _update_voice_options()
             # Enable controls for the new provider (local is usually ready)
-            prov = _get_current_provider()
+            _get_current_provider()
             try:
                 st = get_tts_status()
                 if st.get("ready"):
-                    if lang_select: lang_select.enable()
-                    if voice_select: voice_select.enable()
-                    if save_btn: save_btn.enable()
-                    if test_btn: test_btn.enable()
+                    if lang_select:
+                        lang_select.enable()
+                    if voice_select:
+                        voice_select.enable()
+                    if save_btn:
+                        save_btn.enable()
+                    if test_btn:
+                        test_btn.enable()
             except Exception:
                 pass
 
@@ -2962,18 +3415,24 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
             ]
             lang_options = {code: f"{name} ({code})" for code, name in _supported}
             safe_lang = current_lang if current_lang in lang_options else "en"
-            lang_select = ui.select(
-                options=lang_options,
-                value=safe_lang,
-                label="Default Voiceover Language",
-            ).props("dense").classes("w-full mb-2")
+            lang_select = (
+                ui.select(
+                    options=lang_options,
+                    value=safe_lang,
+                    label="Default Voiceover Language",
+                )
+                .props("dense")
+                .classes("w-full mb-2")
+            )
 
             # Initial voice list depends on the (possibly just changed) provider
             prov = _get_current_provider()
             if prov == "local":
                 raw_voice_options = get_piper_voices_for_language(safe_lang) or []
                 if not raw_voice_options:
-                    raw_voice_options = [("en_US-lessac-medium", "Lessac (clear, natural US English)")]
+                    raw_voice_options = [
+                        ("en_US-lessac-medium", "Lessac (clear, natural US English)")
+                    ]
                 label_for_voice = "Default Local Voice (offline)"
             else:
                 raw_voice_options = get_google_voices_for_language(safe_lang) or []
@@ -2984,11 +3443,15 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
             voice_values = [opt[0] for opt in raw_voice_options]
             safe_voice = current_voice if current_voice in voice_values else voice_values[0]
 
-            voice_select = ui.select(
-                options=raw_voice_options,
-                value=None,
-                label=label_for_voice,
-            ).props("dense").classes("w-full mb-1")
+            voice_select = (
+                ui.select(
+                    options=raw_voice_options,
+                    value=None,
+                    label=label_for_voice,
+                )
+                .props("dense")
+                .classes("w-full mb-1")
+            )
 
             if safe_voice in voice_values:
                 voice_select.value = safe_voice
@@ -3008,13 +3471,20 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
                 ui.notify(f"TTS settings saved ({prov})", color="positive")
 
             with ui.row().classes("gap-2 mb-2"):
-                save_btn = ui.button("Save TTS Settings", on_click=save_tts_settings, color="primary").props("size=sm")
+                save_btn = ui.button(
+                    "Save TTS Settings", on_click=save_tts_settings, color="primary"
+                ).props("size=sm")
 
                 async def test_current_tts():
                     try:
                         prov = _get_current_provider()
                         test_lang = clean_tts_language(lang_select.value) or "en"
-                        test_text = TTS_TEST_PHRASES.get(test_lang, TTS_TEST_PHRASES.get("en", "This is a test of the current text-to-speech settings."))
+                        test_text = TTS_TEST_PHRASES.get(
+                            test_lang,
+                            TTS_TEST_PHRASES.get(
+                                "en", "This is a test of the current text-to-speech settings."
+                            ),
+                        )
                         test_voice = clean_tts_voice(voice_select.value)
 
                         if prov == "local":
@@ -3024,7 +3494,9 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
 
                         status = get_tts_status()
                         if not status.get("ready", False):
-                            ui.notify(status.get('message', 'Not ready for TTS test'), color="warning")
+                            ui.notify(
+                                status.get("message", "Not ready for TTS test"), color="warning"
+                            )
                             return
 
                         out_path = get_default_export_directory() / "tts_test_sample.mp3"
@@ -3039,7 +3511,9 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
                         ui.notify(f"TTS test failed: {ex}", color="negative")
                         print(f"[TTS Test] {ex}")
 
-                test_btn = ui.button("Test Current Voice", on_click=test_current_tts, color="secondary").props("size=sm outline")
+                test_btn = ui.button(
+                    "Test Current Voice", on_click=test_current_tts, color="secondary"
+                ).props("size=sm outline")
 
             # Initial enable/disable based on readiness of the chosen provider
             try:
@@ -3049,10 +3523,14 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
                 initial_ready = True if _get_current_provider() == "local" else False
 
             if not initial_ready:
-                if lang_select: lang_select.disable()
-                if voice_select: voice_select.disable()
-                if save_btn: save_btn.disable()
-                if test_btn: test_btn.disable()
+                if lang_select:
+                    lang_select.disable()
+                if voice_select:
+                    voice_select.disable()
+                if save_btn:
+                    save_btn.disable()
+                if test_btn:
+                    test_btn.disable()
 
             ui.label(
                 "Local = completely offline (Piper). Google = best quality but requires one-time login and internet for generation."
@@ -3064,15 +3542,17 @@ def _render_text_to_speech_settings(container: ui.element) -> None:
 
         except Exception as tts_ex:
             ui.label(f"[TTS settings UI failed to load: {tts_ex}]").classes("text-negative text-xs")
-            ui.button("Check Status", on_click=_refresh_tts_status, color="secondary").props("size=sm outline")
+            ui.button("Check Status", on_click=_refresh_tts_status, color="secondary").props(
+                "size=sm outline"
+            )
 
 
 def _render_translation_settings(container: ui.element) -> None:
     """Translation settings (default language for 'Transcribe + Translate')."""
     from minicat.core.settings import (
+        clean_tts_language,
         get_preference,
         set_preference,
-        clean_tts_language,
     )
 
     with container:
@@ -3093,24 +3573,36 @@ def _render_translation_settings(container: ui.element) -> None:
         ]
 
         lang_options = {code: label for code, label in common_langs}
-        default_lang_select = ui.select(
-            options=lang_options,
-            value=current_default_lang if current_default_lang in lang_options else None,
-            label="Default language for 'Transcribe + Translate'",
-            clearable=True,
-        ).props("dense").classes("w-full mb-1")
+        default_lang_select = (
+            ui.select(
+                options=lang_options,
+                value=current_default_lang if current_default_lang in lang_options else None,
+                label="Default language for 'Transcribe + Translate'",
+                clearable=True,
+            )
+            .props("dense")
+            .classes("w-full mb-1")
+        )
 
-        custom_lang = ui.input(
-            "Custom language code (e.g. 'et' for Estonian)",
-            value=current_default_lang if current_default_lang not in lang_options else ""
-        ).props("dense").classes("w-full mb-1")
+        custom_lang = (
+            ui.input(
+                "Custom language code (e.g. 'et' for Estonian)",
+                value=current_default_lang if current_default_lang not in lang_options else "",
+            )
+            .props("dense")
+            .classes("w-full mb-1")
+        )
 
         def save_default_translation_lang():
-            lang = clean_tts_language(custom_lang.value or default_lang_select.value or "en") or "en"
+            lang = (
+                clean_tts_language(custom_lang.value or default_lang_select.value or "en") or "en"
+            )
             set_preference("ai.default_translation_lang", lang)
             ui.notify(f"Default translation language set to: {lang}", color="positive")
 
-        ui.button("Save Default Language", on_click=save_default_translation_lang, color="primary").props("size=sm").classes("mb-2")
+        ui.button(
+            "Save Default Language", on_click=save_default_translation_lang, color="primary"
+        ).props("size=sm").classes("mb-2")
 
 
 def _open_help_dialog() -> None:
@@ -3132,7 +3624,9 @@ def _open_help_dialog() -> None:
         with ui.column().classes("gap-1 mb-4"):
             for key, action in shortcuts:
                 with ui.row().classes("items-center gap-3"):
-                    ui.label(key).classes("font-mono text-sm bg-[#222] px-2 py-0.5 rounded w-32 text-center")
+                    ui.label(key).classes(
+                        "font-mono text-sm bg-[#222] px-2 py-0.5 rounded w-32 text-center"
+                    )
                     ui.label(action).classes("text-sm")
 
         ui.separator().classes("my-3")
@@ -3244,7 +3738,9 @@ def _open_help_dialog() -> None:
 
         with ui.column().classes("text-sm text-grey-5 gap-1"):
             ui.label("CAT+TAG — Personal video catalog + AI tools")
-            ui.label("Built for people who shoot a lot of footage and need to actually find and repurpose things later.")
+            ui.label(
+                "Built for people who shoot a lot of footage and need to actually find and repurpose things later."
+            )
             ui.label("100% local. No cloud. No telemetry. Full creative control.")
             ui.label("Copyright © 2026 Mikko Niittymäki")
 
@@ -3289,17 +3785,21 @@ def _rename_project_dialog(state: AppState, current_name: str):
     with ui.dialog() as dialog, ui.card().classes("w-80"):
         ui.label("Rename Project").classes("text-h6 mb-2")
         new_name = ui.input("New name", value=current_name)
+
         def do_rename():
             name = new_name.value.strip()
             if name and name != current_name:
                 updated = db.rename_project(state.catalog_root, current_name, name)
                 dialog.close()
                 if state.filters.project and current_name in state.filters.project:
-                    state.filters.project = [name if p == current_name else p for p in state.filters.project]
+                    state.filters.project = [
+                        name if p == current_name else p for p in state.filters.project
+                    ]
                 refresh_all_ui(state)
                 ui.notify(f"Renamed. Updated {updated} clips.", color="positive")
             else:
                 ui.notify("Enter a different name.", color="warning")
+
         with ui.row().classes("justify-end gap-2 mt-4"):
             ui.button("Cancel", on_click=dialog.close).props("flat")
             ui.button("Rename", on_click=do_rename, color="primary")
@@ -3309,36 +3809,51 @@ def _rename_project_dialog(state: AppState, current_name: str):
 def _delete_project_dialog(state: AppState, current_name: str):
     with ui.dialog() as dialog, ui.card().classes("w-96"):
         ui.label(f"Delete Project “{current_name}”?").classes("text-h6 mb-1")
-        ui.label("This will permanently delete the project record from the database (and its client associations).").classes("text-xs text-grey-6 mb-3")
+        ui.label(
+            "This will permanently delete the project record from the database (and its client associations)."
+        ).classes("text-xs text-grey-6 mb-3")
 
         choice = ui.radio(
             ["Remove project from clips (keep clips)", "Delete all clips in this project"],
-            value="Remove project from clips (keep clips)"
+            value="Remove project from clips (keep clips)",
         )
+
         def do_delete():
             also_delete = "Delete all" in choice.value
             if also_delete:
                 # Cleanup artifacts for clips that will be deleted (DB delete doesn't clean files)
                 try:
                     from minicat.core.video import cleanup_all_generated_files_for_clip
-                    clips_in_project = [v for v in state.videos if getattr(v, "project", None) == current_name]
+
+                    clips_in_project = [
+                        v for v in state.videos if getattr(v, "project", None) == current_name
+                    ]
                     for v in clips_in_project:
                         if v.id:
                             try:
-                                cleanup_all_generated_files_for_clip(v.id, state.catalog_root, original_filename=v.filename)
+                                cleanup_all_generated_files_for_clip(
+                                    v.id, state.catalog_root, original_filename=v.filename
+                                )
                             except Exception as cl_ex:
-                                print(f"[Delete Project] Artifact cleanup failed for clip {v.id}: {cl_ex}")
+                                print(
+                                    f"[Delete Project] Artifact cleanup failed for clip {v.id}: {cl_ex}"
+                                )
                 except Exception as ex:
                     print(f"[Delete Project] Pre-cleanup failed: {ex}")
-            affected = db.delete_project(state.catalog_root, current_name, also_delete_clips=also_delete)
+            affected = db.delete_project(
+                state.catalog_root, current_name, also_delete_clips=also_delete
+            )
             dialog.close()
             state.clear_filters()
             refresh_all_ui(state)
             ui.notify(
-                f"Deleted project and {affected} clips." if also_delete else f"Removed project from {affected} clips.",
-                color="negative" if also_delete else "positive"
+                f"Deleted project and {affected} clips."
+                if also_delete
+                else f"Removed project from {affected} clips.",
+                color="negative" if also_delete else "positive",
             )
             _schedule_orphan_cleanup(state)
+
         with ui.row().classes("justify-end gap-2 mt-4 w-full"):
             ui.button("Cancel", on_click=dialog.close).props("flat")
             ui.button("Delete", on_click=do_delete, color="negative")
@@ -3367,7 +3882,7 @@ def _show_rich_project_dialog(state: AppState, name: str):
                 options={c.id: c.name for c in all_clients},
                 value=[c.id for c in all_clients if c.name in current_client_names],
                 label="Clients (can belong to multiple)",
-                multiple=True
+                multiple=True,
             ).props("use-chips")
 
             def create_new_client():
@@ -3408,7 +3923,9 @@ def _show_rich_project_dialog(state: AppState, name: str):
                         ui.button("Cancel", on_click=new_client_dialog.close).props("flat")
                         ui.button("Create client", on_click=do_create_client, color="primary")
 
-            ui.button("Create New Client", icon="add", on_click=create_new_client).props("size=sm flat dense").classes("mt-1")
+            ui.button("Create New Client", icon="add", on_click=create_new_client).props(
+                "size=sm flat dense"
+            ).classes("mt-1")
 
             director = ui.input("Director", value=proj.director or "")
             producer = ui.input("Producer", value=proj.producer or "")
@@ -3417,7 +3934,7 @@ def _show_rich_project_dialog(state: AppState, name: str):
             loc = ui.input("Location", value=proj.location or "")
             status = ui.select(
                 ["Pre-production", "Production", "Post-production", "Delivered", "Archived"],
-                value=proj.status
+                value=proj.status,
             )
             notes = ui.textarea("Notes", value=proj.notes or "")
 
@@ -3452,7 +3969,11 @@ def _show_rich_project_dialog(state: AppState, name: str):
             ui.notify("Project saved", color="positive")
 
         with ui.row().classes("justify-between gap-2 mt-4 w-full"):
-            ui.button("Delete", on_click=lambda: (_delete_project_dialog(state, proj.name), dialog.close()), color="negative").props("flat")
+            ui.button(
+                "Delete",
+                on_click=lambda: (_delete_project_dialog(state, proj.name), dialog.close()),
+                color="negative",
+            ).props("flat")
             with ui.row().classes("gap-2"):
                 ui.button("Cancel", on_click=dialog.close).props("flat")
                 ui.button("Save", on_click=save, color="primary")
@@ -3462,7 +3983,7 @@ def _show_rich_project_dialog(state: AppState, name: str):
 
 def _show_export_xml_dialog(state: AppState, selected: list[Video]) -> None:
     """Dialog for exporting the current selection as XML timeline.
-    
+
     Uses the improved Premiere-native XMEML exporter (same as AI Journalist)
     when all selected clips come from the same source file. Falls back to
     legacy FCP7 format for mixed-source selections.
@@ -3485,9 +4006,13 @@ def _show_export_xml_dialog(state: AppState, selected: list[Video]) -> None:
 
         seq_name = ui.input("Sequence name", value=default_name).classes("w-full mb-2")
 
-        fps_input = ui.number("Timeline FPS", value=default_fps, min=1, max=120, step=1).classes("w-full mb-2")
+        fps_input = ui.number("Timeline FPS", value=default_fps, min=1, max=120, step=1).classes(
+            "w-full mb-2"
+        )
 
-        ui.label("Order: Clips will appear in the same order as the current grid (respecting your sort/filter).").classes("text-xs text-grey-6 mb-4")
+        ui.label(
+            "Order: Clips will appear in the same order as the current grid (respecting your sort/filter)."
+        ).classes("text-xs text-grey-6 mb-4")
 
         def do_export():
             name = seq_name.value.strip() or default_name
@@ -3496,13 +4021,14 @@ def _show_export_xml_dialog(state: AppState, selected: list[Video]) -> None:
             # Ask user where to save using native dialog when possible
             try:
                 import webview
+
                 win = webview.active_window() or (webview.windows[0] if webview.windows else None)
                 if win:
                     res = win.create_file_dialog(
                         webview.FileDialog.SAVE,
                         directory=str(_Path.home()),
                         save_filename=f"{name}.xml",
-                        file_types=("XML Files (*.xml)",)
+                        file_types=("XML Files (*.xml)",),
                     )
                     if not res:
                         dialog.close()
@@ -3521,24 +4047,28 @@ def _show_export_xml_dialog(state: AppState, selected: list[Video]) -> None:
                 # Use the same high-quality Premiere XMEML exporter as the AI Journalist
                 # when all selected clips come from the same source file.
                 from pathlib import Path as _Path2
+
                 source_paths = {str(_Path2(v.path).resolve()) for v in selected}
-                
+
                 if len(source_paths) == 1:
                     # All clips from same source → use the improved journalist-style exporter
                     source_path = list(source_paths)[0]
-                    
+
                     # Convert full clips into "cut segments" (full duration each)
                     cut_segments = []
                     for v in selected:
                         dur = v.duration or 0
-                        cut_segments.append({
-                            "source_in": 0.0,
-                            "source_out": dur,
-                            "text": v.filename,
-                            "reason": "Full clip from topbar export"
-                        })
-                    
+                        cut_segments.append(
+                            {
+                                "source_in": 0.0,
+                                "source_out": dur,
+                                "text": v.filename,
+                                "reason": "Full clip from topbar export",
+                            }
+                        )
+
                     from minicat.ai.xmeml_exporter import generate_xmeml
+
                     generate_xmeml(
                         cut_segments=cut_segments,
                         source_video_path=source_path,
@@ -3553,17 +4083,26 @@ def _show_export_xml_dialog(state: AppState, selected: list[Video]) -> None:
                     # Mixed sources → fall back to legacy FCP7 exporter
                     export_fcp7_xml(selected, out_path, sequence_name=name, fps=fps)
                     used_improved = False
-                
+
                 dialog.close()
-                
+
                 if used_improved:
-                    ui.notify(f"Exported {count} clips → {out_path.name} (improved Premiere structure)", color="positive", duration=6)
+                    ui.notify(
+                        f"Exported {count} clips → {out_path.name} (improved Premiere structure)",
+                        color="positive",
+                        duration=6,
+                    )
                 else:
-                    ui.notify(f"Exported {count} clips → {out_path.name} (legacy FCP7 format)", color="positive", duration=6)
+                    ui.notify(
+                        f"Exported {count} clips → {out_path.name} (legacy FCP7 format)",
+                        color="positive",
+                        duration=6,
+                    )
                 # Optionally reveal the file
                 try:
                     import platform
                     import subprocess
+
                     if platform.system() == "Darwin":
                         subprocess.run(["open", "-R", str(out_path)])
                 except Exception:
@@ -3601,10 +4140,12 @@ def show_ffmpeg_required_dialog():
 
         with ui.row().classes("justify-end gap-2 w-full"):
             ui.button("Close", on_click=dialog.close).props("flat")
+
             # On macOS we can try to be extra helpful
             def open_terminal_and_close():
                 try:
                     import subprocess
+
                     subprocess.Popen(["open", "-a", "Terminal"])
                 except Exception:
                     pass
@@ -3647,16 +4188,26 @@ def _show_burn_subtitles_dialog(v: Video) -> None:
         ui.label("Burn Subtitles into Video").classes("text-h6 mb-2")
 
         if not has_trans:
-            ui.label("⚠️ No transcription available yet. Transcribe the clip first.").classes("text-red-400 text-sm mb-2")
+            ui.label("⚠️ No transcription available yet. Transcribe the clip first.").classes(
+                "text-red-400 text-sm mb-2"
+            )
 
-        burn_lang = ui.select(
-            options=lang_options,
-            value="original" if has_trans else None,
-            label="Subtitle Language"
-        ).props("dense").classes("w-full mb-2")
+        burn_lang = (
+            ui.select(
+                options=lang_options,
+                value="original" if has_trans else None,
+                label="Subtitle Language",
+            )
+            .props("dense")
+            .classes("w-full mb-2")
+        )
 
-        out_folder = ui.input("Output folder", value=str(get_default_export_directory())).props("dense")
-        out_name = ui.input("Output filename", value=f"{v.filename.rsplit('.',1)[0]}_burned.mp4").props("dense")
+        out_folder = ui.input("Output folder", value=str(get_default_export_directory())).props(
+            "dense"
+        )
+        out_name = ui.input(
+            "Output filename", value=f"{v.filename.rsplit('.', 1)[0]}_burned.mp4"
+        ).props("dense")
 
         async def do_burn():
             try:
@@ -3727,7 +4278,10 @@ def _show_burn_subtitles_dialog(v: Video) -> None:
             if has_trans:
                 ui.button("Burn Subtitles", on_click=do_burn, color="primary")
             else:
-                ui.button("Burn Subtitles", on_click=lambda: ui.notify("Transcribe first", color="warning")).props("disable")
+                ui.button(
+                    "Burn Subtitles",
+                    on_click=lambda: ui.notify("Transcribe first", color="warning"),
+                ).props("disable")
 
     burn_dialog.open()
 
@@ -3741,8 +4295,8 @@ def _show_ai_journalist_cut_dialog(v) -> None:
       - Human-readable TXT
       - Actual rendered video file (MP4) containing exactly the selected clips
     """
+
     from minicat.core import video as video_core
-    from pathlib import Path as _Path  # for temp audio dir
 
     if not getattr(v, "transcription_segments", None):
         ui.notify("This clip has no transcription. Transcribe it first.", color="warning")
@@ -3780,7 +4334,10 @@ def _show_ai_journalist_cut_dialog(v) -> None:
     else:
         # Fallback only if duration metadata is missing for some reason
         max_possible = 600
-        console.print("[yellow]Warning: Could not determine clip duration. Using 600s as safe upper limit.[/]")
+        ui.notify(
+            "Warning: Could not determine clip duration. Using 600s as safe upper limit.",
+            color="warning",
+        )
 
     # Sensible default: 90s or the full clip (whichever is smaller)
     default_max_seconds = min(90, max_possible)
@@ -3792,89 +4349,132 @@ def _show_ai_journalist_cut_dialog(v) -> None:
 
         # Controls
         with ui.row().classes("gap-4 items-end w-full"):
-            min_dur = ui.number(
-                "Min duration (seconds)",
-                value=30,
-                min=5,
-                max=max_possible,
-                step=5,
-            ).props("dense").classes("w-48")
+            min_dur = (
+                ui.number(
+                    "Min duration (seconds)",
+                    value=30,
+                    min=5,
+                    max=max_possible,
+                    step=5,
+                )
+                .props("dense")
+                .classes("w-48")
+            )
 
-            max_dur = ui.number(
-                "Max duration (seconds)",
-                value=default_max_seconds,
-                min=15,
-                max=max_possible,
-                step=5,
-            ).props("dense").classes("w-48")
+            max_dur = (
+                ui.number(
+                    "Max duration (seconds)",
+                    value=default_max_seconds,
+                    min=15,
+                    max=max_possible,
+                    step=5,
+                )
+                .props("dense")
+                .classes("w-48")
+            )
 
-        purpose = ui.select(
-            {
-                "News Package": "News Package (tight broadcast package: strong open, key soundbites, closer)",
-                "Social Media Teaser": "Social Media Teaser (punchy curiosity hook — arresting first 8 seconds)",
-                "Best Soundbites / Quotes": "Best Soundbites / Quotes (most quotable lines, intercut for maximum impact)",
-                "Emotional / Human Story": "Emotional / Human Story (personal stakes & emotional contrast between voices)",
-                "In-depth Highlight": "In-depth Highlight (deeper synthesis of key or surprising territory)",
-                # new 2026
-                "Investigative Cold Open": "Investigative Cold Open (high-suspense hook: facts + cliffhangers into the mystery)",
-                "Expert Manifesto / Manifesto Call": "Expert Manifesto / Manifesto Call (mission-driven claims to collective call-to-action)",
-                "Character Retrospective": "Character Retrospective (nostalgic, reflective look back on life, career or era)",
-                "Social Jump-Cut Strip": "Social Jump-Cut Strip (ultra-aggressive TikTok/Shorts bursts — zero dead air)",
-                "Three-Act Underdog Arc": "Three-Act Underdog Arc (strict 3-act underdog journey: struggle → epiphany → triumph)",
-            },
-            value=default_purpose,
-            label="Purpose",
-        ).props("dense").classes("w-full mt-2")
+        purpose = (
+            ui.select(
+                {
+                    "News Package": "News Package (tight broadcast package: strong open, key soundbites, closer)",
+                    "Social Media Teaser": "Social Media Teaser (punchy curiosity hook — arresting first 8 seconds)",
+                    "Best Soundbites / Quotes": "Best Soundbites / Quotes (most quotable lines, intercut for maximum impact)",
+                    "Emotional / Human Story": "Emotional / Human Story (personal stakes & emotional contrast between voices)",
+                    "In-depth Highlight": "In-depth Highlight (deeper synthesis of key or surprising territory)",
+                    # new 2026
+                    "Investigative Cold Open": "Investigative Cold Open (high-suspense hook: facts + cliffhangers into the mystery)",
+                    "Expert Manifesto / Manifesto Call": "Expert Manifesto / Manifesto Call (mission-driven claims to collective call-to-action)",
+                    "Character Retrospective": "Character Retrospective (nostalgic, reflective look back on life, career or era)",
+                    "Social Jump-Cut Strip": "Social Jump-Cut Strip (ultra-aggressive TikTok/Shorts bursts — zero dead air)",
+                    "Three-Act Underdog Arc": "Three-Act Underdog Arc (strict 3-act underdog journey: struggle → epiphany → triumph)",
+                },
+                value=default_purpose,
+                label="Purpose",
+            )
+            .props("dense")
+            .classes("w-full mt-2")
+        )
 
-        tone = ui.select(
-            {
-                "newsroom": "Newsroom (tight & factual)",
-                "flexible": "Flexible / Creative (atmospheric & juxtapositions)",
-                "documentary": "Documentary (story-driven & atmospheric)",
-                "corporate": "Corporate (professional & polished)",
-                "commercial": "Commercial (persuasive & brand-driven)",
-                "rewrite": "Verbatim Scriptwriter (new story from real spoken material only)",
-                # new 2026 creative directorial styles (available for Journalist too)
-                "investigative_hook": "Investigative Hook (cinematic, cliffhangers)",
-                "masterclass": "Masterclass (authoritative, long-form argument)",
-                "confessional": "Confessional (vulnerable, intimate, preserves stumbles)",
-                "engagement_bomb": "Engagement Bomb (ultra-fast TikTok/Shorts)",
-                "subversive": "Subversive (witty, ironic, humanizing)",
-                "visual_poem": "Visual Poem (atmospheric, rhythmic, musical)",
-                "manifesto": "Manifesto (inspirational, mobilizing call-to-action)",
-                "underdog": "Underdog (strict 3-act: struggle → pivot → triumph)",
-                "analytical": "Analytical (cause-effect, data, objective)",
-                "legacy": "Legacy (warm, wistful, reflective past-tense)",
-            },
-            value=default_tone,
-            label="Tone",
-        ).props("dense").classes("w-full mt-1")
+        tone = (
+            ui.select(
+                {
+                    "newsroom": "Newsroom (tight & factual)",
+                    "flexible": "Flexible / Creative (atmospheric & juxtapositions)",
+                    "documentary": "Documentary (story-driven & atmospheric)",
+                    "corporate": "Corporate (professional & polished)",
+                    "commercial": "Commercial (persuasive & brand-driven)",
+                    "rewrite": "Verbatim Scriptwriter (new story from real spoken material only)",
+                    # new 2026 creative directorial styles (available for Journalist too)
+                    "investigative_hook": "Investigative Hook (cinematic, cliffhangers)",
+                    "masterclass": "Masterclass (authoritative, long-form argument)",
+                    "confessional": "Confessional (vulnerable, intimate, preserves stumbles)",
+                    "engagement_bomb": "Engagement Bomb (ultra-fast TikTok/Shorts)",
+                    "subversive": "Subversive (witty, ironic, humanizing)",
+                    "visual_poem": "Visual Poem (atmospheric, rhythmic, musical)",
+                    "manifesto": "Manifesto (inspirational, mobilizing call-to-action)",
+                    "underdog": "Underdog (strict 3-act: struggle → pivot → triumph)",
+                    "analytical": "Analytical (cause-effect, data, objective)",
+                    "legacy": "Legacy (warm, wistful, reflective past-tense)",
+                },
+                value=default_tone,
+                label="Tone",
+            )
+            .props("dense")
+            .classes("w-full mt-1")
+        )
 
-        clean_fillers = ui.checkbox(
-            "Remove filler words (cleaner, more polished sentences)",
-            value=False
-        ).props("dense").classes("mt-1 mb-2")
+        clean_fillers = (
+            ui.checkbox("Remove filler words (cleaner, more polished sentences)", value=False)
+            .props("dense")
+            .classes("mt-1 mb-2")
+        )
 
         # Same VoiceOver/Narration style options as AI Director
-        narration_style = ui.select(
-            {
-                None: "No narration / voiceover script",
-                "omniscient": "Omniscient (3rd-person journalistic — objective bridges, context, balance)",
-                "subjective": "Subjective (1st-person reflective / essay-film style)",
-                "explainer": "Explainer (high-energy, punchy short-form / social hook voice)",
-            },
-            value=None,
-            label="Narration / Voiceover Style (optional)"
-        ).props("dense").classes("w-full mt-1")
+        narration_style = (
+            ui.select(
+                {
+                    None: "No narration / voiceover script",
+                    "omniscient": "Omniscient (3rd-person journalistic — objective bridges, context, balance)",
+                    "subjective": "Subjective (1st-person reflective / essay-film style)",
+                    "explainer": "Explainer (high-energy, punchy short-form / social hook voice)",
+                },
+                value=None,
+                label="Narration / Voiceover Style (optional)",
+            )
+            .props("dense")
+            .classes("w-full mt-1")
+        )
 
-        ui.label("If a style is chosen, the AI will write a style-aware narration script (voiceover) for the cut in the transcript language. This matches the full VoiceOver/Narration options from AI Director. The script can be rendered as audio or used as text.").classes("text-xs text-blue-400 mb-2")
+        ui.label(
+            "If a style is chosen, the AI will write a style-aware narration script (voiceover) for the cut in the transcript language. This matches the full VoiceOver/Narration options from AI Director. The script can be rendered as audio or used as text."
+        ).classes("text-xs text-blue-400 mb-2")
 
         # Narration length and bridge count controls (only apply when a narration style is selected)
         with ui.row().classes("gap-2 mt-1"):
-            narr_min_sec = ui.number("Narration min (s)", value=5, min=0, step=5).props("dense").classes("w-28").tooltip("Minimum total spoken seconds for the generated narration script")
-            narr_max_sec = ui.number("Narration max (s)", value=45, min=0, step=5).props("dense").classes("w-28").tooltip("Maximum total spoken seconds for the narration script")
-            narr_min_bridges = ui.number("Min bridges", value=1, min=0, max=12).props("dense").classes("w-24").tooltip("Min number of conceptual bridge sections in the narration script")
-            narr_max_bridges = ui.number("Max bridges", value=4, min=0, max=12).props("dense").classes("w-24").tooltip("Max number of conceptual bridge sections in the narration script")
+            narr_min_sec = (
+                ui.number("Narration min (s)", value=5, min=0, step=5)
+                .props("dense")
+                .classes("w-28")
+                .tooltip("Minimum total spoken seconds for the generated narration script")
+            )
+            narr_max_sec = (
+                ui.number("Narration max (s)", value=45, min=0, step=5)
+                .props("dense")
+                .classes("w-28")
+                .tooltip("Maximum total spoken seconds for the narration script")
+            )
+            narr_min_bridges = (
+                ui.number("Min bridges", value=1, min=0, max=12)
+                .props("dense")
+                .classes("w-24")
+                .tooltip("Min number of conceptual bridge sections in the narration script")
+            )
+            narr_max_bridges = (
+                ui.number("Max bridges", value=4, min=0, max=12)
+                .props("dense")
+                .classes("w-24")
+                .tooltip("Max number of conceptual bridge sections in the narration script")
+            )
 
         with ui.row().classes("gap-2 mt-3"):
             lang_select = ui.select(
@@ -3883,9 +4483,15 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                 label="Use transcript in",
             ).props("dense")
 
-            num_versions = ui.number("Versions to generate", value=2, min=1, max=3).props("dense").classes("w-32")
+            num_versions = (
+                ui.number("Versions to generate", value=2, min=1, max=3)
+                .props("dense")
+                .classes("w-32")
+            )
 
-        generate_btn = ui.button("Generate AI Cuts", icon="auto_awesome", color="primary").classes("mt-4 w-full")
+        generate_btn = ui.button("Generate AI Cuts", icon="auto_awesome", color="primary").classes(
+            "mt-4 w-full"
+        )
 
         # Results area
         results_container = ui.column().classes("w-full mt-4")
@@ -3899,9 +4505,11 @@ def _show_ai_journalist_cut_dialog(v) -> None:
             # new narrative text and often emits drifted source_in/out.
             try:
                 from minicat.core.video import repair_journalist_segments_with_transcript
+
                 cat_root = None
                 try:
                     from minicat.ui.app import get_state
+
                     st = get_state()
                     cat_root = getattr(st, "catalog_root", None) if st else None
                 except Exception:
@@ -3926,7 +4534,9 @@ def _show_ai_journalist_cut_dialog(v) -> None:
             with results_container:
                 for version in versions:
                     with ui.card().classes("w-full mb-3 border"):
-                        header = f"{version.get('version_id', '?')} — {version.get('title', 'Untitled')}"
+                        header = (
+                            f"{version.get('version_id', '?')} — {version.get('title', 'Untitled')}"
+                        )
                         ui.label(header).classes("text-base font-semibold mb-1")
 
                         dur = version.get("total_duration", 0)
@@ -3937,7 +4547,9 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                         if version.get("_reorder_note"):
                             note = version["_reorder_note"]
                             color = "positive" if "✓" in note else "warning"
-                            ui.label(note).classes(f"text-xs mb-1 {'text-positive' if color=='positive' else 'text-warning'}")
+                            ui.label(note).classes(
+                                f"text-xs mb-1 {'text-positive' if color == 'positive' else 'text-warning'}"
+                            )
 
                         summary = version.get("narrative_summary", "")
                         if summary:
@@ -3946,22 +4558,39 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                         # Show narration script if the AI generated one for voiceover (new for Journalist)
                         narration = (version.get("narration_text") or "").strip()
                         if narration:
-                            with ui.card().classes("w-full bg-blue-900/15 border-l-2 border-blue-500 mb-2 p-2"):
+                            with ui.card().classes(
+                                "w-full bg-blue-900/15 border-l-2 border-blue-500 mb-2 p-2"
+                            ):
                                 style = version.get("narration_style")
-                                label = f"🎙️ Narration script for voiceover" + (f" ({style})" if style else "")
-                                ui.label(label).classes("text-xs font-semibold text-blue-300 mb-0.5")
+                                label = "🎙️ Narration script for voiceover" + (
+                                    f" ({style})" if style else ""
+                                )
+                                ui.label(label).classes(
+                                    "text-xs font-semibold text-blue-300 mb-0.5"
+                                )
                                 # Show full (usually short for single clip)
                                 ui.markdown(narration).classes("text-sm text-blue-100")
 
                             # VoiceOver/Narration export options (same as AI Director)
                             with ui.row().classes("gap-2 items-end mb-2"):
-                                vo_voice = ui.input(
-                                    "Voice (optional, blank = use Settings default)",
-                                    value="",
-                                ).props("dense").classes("w-64").tooltip("E.g. 'en_US-amy-medium' for Piper or a Google voice name")
-                                gen_vo_audio = ui.checkbox("Generate voiceover audio (sidecar .wav)", value=True).props("dense")
+                                vo_voice = (
+                                    ui.input(
+                                        "Voice (optional, blank = use Settings default)",
+                                        value="",
+                                    )
+                                    .props("dense")
+                                    .classes("w-64")
+                                    .tooltip(
+                                        "E.g. 'en_US-amy-medium' for Piper or a Google voice name"
+                                    )
+                                )
+                                gen_vo_audio = ui.checkbox(
+                                    "Generate voiceover audio (sidecar .wav)", value=True
+                                ).props("dense")
                                 # "as titles" for journalist means skip audio gen, just use script text (in TXT and as comments in XML)
-                                use_titles = ui.checkbox("Narration as text/titles only (no audio)", value=False).props("dense")
+                                use_titles = ui.checkbox(
+                                    "Narration as text/titles only (no audio)", value=False
+                                ).props("dense")
 
                         # Editable list of segments
                         segs = version.get("selected_segments", [])
@@ -3971,6 +4600,7 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                 if 0 <= idx < len(ver["selected_segments"]):
                                     del ver["selected_segments"][idx]
                                     _render_versions(versions)  # refresh
+
                             return handler
 
                         for idx, seg in enumerate(segs):
@@ -3980,8 +4610,10 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                 e = seg.get("source_out") or seg.get("end", 0)
                                 try:
                                     from minicat.core.video import format_transcript_timecode
+
                                     tc = format_transcript_timecode(
-                                        s, e,
+                                        s,
+                                        e,
                                         fps=getattr(v, "fps", None),
                                         base_timecode=getattr(v, "tc_start", None),
                                     )
@@ -3996,18 +4628,24 @@ def _show_ai_journalist_cut_dialog(v) -> None:
 
                         # Export buttons for this version
                         def export_this_version_as_xml(ver=version):
-                            print(f"[AI Cut XML Export] HANDLER CALLED for version {ver.get('version_id')} of {v.filename}")
+                            print(
+                                f"[AI Cut XML Export] HANDLER CALLED for version {ver.get('version_id')} of {v.filename}"
+                            )
                             ui.notify("Starting XML export...", color="info", duration=2)
                             source_path = Path(v.path).resolve()
 
                             try:
-                                out_name = f"{v.filename.rsplit('.', 1)[0]}_AI_Cut_{ver['version_id']}.xml"
+                                out_name = (
+                                    f"{v.filename.rsplit('.', 1)[0]}_AI_Cut_{ver['version_id']}.xml"
+                                )
                                 export_dir = get_default_export_directory()
                                 out_path = export_dir / out_name
 
                                 segments = ver.get("selected_segments", [])
                                 if not segments:
-                                    ui.notify("No segments in this version to export", color="warning")
+                                    ui.notify(
+                                        "No segments in this version to export", color="warning"
+                                    )
                                     return
 
                                 # Re-resolve every source_in/out from the trans .txt sidecar right at export time.
@@ -4015,8 +4653,11 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                 # (old generate before this fix, or edited externally), the XML <in>/<out> and
                                 # timeline durs will be taken from the exact timecodes in the transscript file.
                                 try:
-                                    from minicat.core.video import repair_journalist_segments_with_transcript
+                                    from minicat.core.video import (
+                                        repair_journalist_segments_with_transcript,
+                                    )
                                     from minicat.ui.app import get_state
+
                                     st = get_state()
                                     cat_root = getattr(st, "catalog_root", None) if st else None
                                     clip_id = getattr(v, "id", None)
@@ -4039,17 +4680,19 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                         except Exception:
                                             pass
                                 except Exception as _xml_re:
-                                    print(f"[AI Cut XML Export] transcript re-resolve skipped: {_xml_re}")
+                                    print(
+                                        f"[AI Cut XML Export] transcript re-resolve skipped: {_xml_re}"
+                                    )
 
                                 # Safety for cleaned versions: if a segment's text was stripped to empty by filler removal,
                                 # use its reason as fallback text so the clip still appears properly in the XML.
                                 for s in segments:
-                                    if not (s.get('text') or '').strip():
-                                        if s.get('reason'):
-                                            s['text'] = s['reason']
+                                    if not (s.get("text") or "").strip():
+                                        if s.get("reason"):
+                                            s["text"] = s["reason"]
 
                                 # For consistency with AI Director: use a dedicated per-export subfolder
-                                suggestion = f"AI_Journalist_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:30] }"
+                                suggestion = f"AI_Journalist_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:30]}"
                                 export_dir = create_export_subfolder(suggestion)
                                 out_path = export_dir / out_name
 
@@ -4064,7 +4707,7 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                     source_video_path=str(source_path),
                                     output_path=out_path,
                                     sequence_name=f"AI Cut - {ver.get('title', ver['version_id'])}",
-                                    narrative_summary=ver.get('narrative_summary'),
+                                    narrative_summary=ver.get("narrative_summary"),
                                     width=getattr(v, "width", None) or 1920,
                                     height=getattr(v, "height", None) or 1080,
                                     audio_channels=getattr(v, "audio_channels", None),
@@ -4081,24 +4724,40 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                     # Especially useful / requested for the no-narration case.
                                     script_path = None
                                     try:
-                                        script_path = export_this_version_as_txt(ver, target_export_dir=export_dir)
+                                        script_path = export_this_version_as_txt(
+                                            ver, target_export_dir=export_dir
+                                        )
                                     except Exception as _script_ex:
-                                        print(f"[AI Cut XML Export] rich script TXT failed (non-fatal): {_script_ex}")
+                                        print(
+                                            f"[AI Cut XML Export] rich script TXT failed (non-fatal): {_script_ex}"
+                                        )
 
                                     if script_path and script_path.exists():
-                                        ui.notify(f"XML + AI JOURNALIST script.txt (SELECTED SEGMENTS + full trans) exported → {out_path.name} (in {export_dir.name})", color="positive", duration=8)
+                                        ui.notify(
+                                            f"XML + AI JOURNALIST script.txt (SELECTED SEGMENTS + full trans) exported → {out_path.name} (in {export_dir.name})",
+                                            color="positive",
+                                            duration=8,
+                                        )
                                     else:
                                         ui.notify(f"XMEML exported to {out_path}", color="positive")
 
                                     # If this version has a narration script, generate the TTS voiceover audio
                                     # (sidecar WAV next to the XML) using the per-export choices (matching Director's VoiceOver options).
                                     narration_text = (ver.get("narration_text") or "").strip()
-                                    if narration_text and not use_titles.value and gen_vo_audio.value:
+                                    if (
+                                        narration_text
+                                        and not use_titles.value
+                                        and gen_vo_audio.value
+                                    ):
                                         try:
                                             nar_lang = ver.get("narration_language") or "en"
                                             nar_name = f"{v.filename.rsplit('.', 1)[0]}_AI_Cut_{ver['version_id']}_Narration.wav"
                                             nar_path = export_dir / nar_name
-                                            ui.notify("Generating narration voiceover audio (TTS)...", color="info", duration=3)
+                                            ui.notify(
+                                                "Generating narration voiceover audio (TTS)...",
+                                                color="info",
+                                                duration=3,
+                                            )
                                             chosen_voice = (vo_voice.value or "").strip() or None
                                             generate_narration_audio_sync(
                                                 text=narration_text,
@@ -4106,12 +4765,21 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                                 output_path=nar_path,
                                                 voice=chosen_voice,
                                             )
-                                            ui.notify(f"Narration voiceover audio saved → {nar_path.name}", color="positive")
+                                            ui.notify(
+                                                f"Narration voiceover audio saved → {nar_path.name}",
+                                                color="positive",
+                                            )
                                         except Exception as vo_ex:
-                                            ui.notify(f"Voiceover audio generation failed: {vo_ex}", color="negative")
+                                            ui.notify(
+                                                f"Voiceover audio generation failed: {vo_ex}",
+                                                color="negative",
+                                            )
                                             print(f"[AI Journalist VO] {vo_ex}")
                                     elif narration_text and use_titles.value:
-                                        ui.notify("Narration text included in TXT/XML (titles-only mode, no audio generated)", color="info")
+                                        ui.notify(
+                                            "Narration text included in TXT/XML (titles-only mode, no audio generated)",
+                                            color="info",
+                                        )
 
                                     # Generate one clean SRT that exactly matches this AI cut's script
                                     # (correct order from the AI, correct timing for the new sequence).
@@ -4121,21 +4789,36 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                         timeline_segs = ai_journalist_cut_to_srt_segments(segments)
                                         if timeline_segs:
                                             fps = getattr(v, "fps", None) or 25.0
-                                            srt_content = segments_to_srt(timeline_segs, strict_timing=True, fps=fps)
+                                            srt_content = segments_to_srt(
+                                                timeline_segs, strict_timing=True, fps=fps
+                                            )
                                             srt_path.write_text(srt_content, encoding="utf-8")
-                                            print(f"[AI Cut Export] Pushed SRT for new cut timeline: {srt_path.name}")
+                                            print(
+                                                f"[AI Cut Export] Pushed SRT for new cut timeline: {srt_path.name}"
+                                            )
                                     except Exception as srt_ex:
-                                        print(f"[AI Cut Export] SRT generation failed (non-fatal): {srt_ex}")
+                                        print(
+                                            f"[AI Cut Export] SRT generation failed (non-fatal): {srt_ex}"
+                                        )
 
                                     # OPUS warning (shown after successful export so user doesn't miss the XML)
                                     try:
                                         if video_core.has_opus_audio(source_path):
+
                                             def _offer_transcode():
                                                 async def do_transcode():
                                                     try:
-                                                        ui.notify("Transcoding to Premiere-friendly AAC version...", color="info", duration=4)
+                                                        ui.notify(
+                                                            "Transcoding to Premiere-friendly AAC version...",
+                                                            color="info",
+                                                            duration=4,
+                                                        )
                                                         out_dir = get_default_export_directory()
-                                                        safe_name = source_path.stem + "_for_Premiere" + source_path.suffix
+                                                        safe_name = (
+                                                            source_path.stem
+                                                            + "_for_Premiere"
+                                                            + source_path.suffix
+                                                        )
                                                         target = out_dir / safe_name
 
                                                         transcoded = await asyncio.to_thread(
@@ -4149,7 +4832,10 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                                             duration=10,
                                                         )
                                                     except Exception as tex:
-                                                        ui.notify(f"Transcode failed: {tex}", color="negative")
+                                                        ui.notify(
+                                                            f"Transcode failed: {tex}",
+                                                            color="negative",
+                                                        )
                                                         print(f"[OPUS Transcode] {tex}")
 
                                                 asyncio.create_task(do_transcode())
@@ -4158,29 +4844,46 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                                 "Note: Source has OPUS audio. Premiere can have trouble linking it. Consider the AAC version.",
                                                 color="warning",
                                                 duration=8,
-                                                actions=[{"label": "Transcode to AAC", "on_click": _offer_transcode}],
+                                                actions=[
+                                                    {
+                                                        "label": "Transcode to AAC",
+                                                        "on_click": _offer_transcode,
+                                                    }
+                                                ],
                                             )
                                     except Exception as opus_err:
-                                        print(f"[AI Cut XML Export] OPUS check failed (non-fatal): {opus_err}")
+                                        print(
+                                            f"[AI Cut XML Export] OPUS check failed (non-fatal): {opus_err}"
+                                        )
 
                                 else:
-                                    ui.notify("XMEML generation completed but file not found on disk", color="warning")
-                                    print(f"[AI Cut XML Export] File not found after generate: {out_path}")
+                                    ui.notify(
+                                        "XMEML generation completed but file not found on disk",
+                                        color="warning",
+                                    )
+                                    print(
+                                        f"[AI Cut XML Export] File not found after generate: {out_path}"
+                                    )
 
                             except Exception as ex:
                                 ui.notify(f"XML Export failed: {ex}", color="negative")
                                 print(f"[AI Cut XML Export] EXCEPTION: {ex}")
                                 import traceback
+
                                 traceback.print_exc()
 
-                        def export_this_version_as_txt(ver=version, target_export_dir: "Path | None" = None):
+                        def export_this_version_as_txt(
+                            ver=version, target_export_dir: Path | None = None
+                        ):
                             """Export the rich AI JOURNALIST CUT script/story as TXT.
 
                             If target_export_dir is provided, write the script into that existing folder
                             (used by XML export to bundle XML + script like AI Director does).
                             Otherwise creates its own subfolder and notifies.
                             """
-                            print(f"[AI Cut TXT Export] HANDLER CALLED for version {ver.get('version_id')} of {v.filename}")
+                            print(
+                                f"[AI Cut TXT Export] HANDLER CALLED for version {ver.get('version_id')} of {v.filename}"
+                            )
                             do_notify = target_export_dir is None
                             if do_notify:
                                 ui.notify("Starting TXT export...", color="info", duration=2)
@@ -4193,9 +4896,11 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                     export_dir.mkdir(parents=True, exist_ok=True)
                                 else:
                                     # Use per-export subfolder for consistency
-                                    suggestion = f"AI_Journalist_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:30] }"
+                                    suggestion = f"AI_Journalist_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:30]}"
                                     export_dir = create_export_subfolder(suggestion)
-                                out_name = f"{v.filename.rsplit('.', 1)[0]}_AI_Cut_{ver['version_id']}.txt"
+                                out_name = (
+                                    f"{v.filename.rsplit('.', 1)[0]}_AI_Cut_{ver['version_id']}.txt"
+                                )
                                 out_path = export_dir / out_name
                                 print(f"[AI Cut TXT Export] Target path: {out_path}")
 
@@ -4209,9 +4914,14 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                     pass
 
                                 effective_label_lang = transcript_lang
-                                if not effective_label_lang or effective_label_lang in ("original", ""):
+                                if not effective_label_lang or effective_label_lang in (
+                                    "original",
+                                    "",
+                                ):
                                     try:
-                                        effective_label_lang = getattr(v, "original_language", None) or "en"
+                                        effective_label_lang = (
+                                            getattr(v, "original_language", None) or "en"
+                                        )
                                     except Exception:
                                         effective_label_lang = "en"
                                 if ver.get("script_language"):
@@ -4225,13 +4935,17 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                 lines.append(labels["ai_journalist_cut"])
                                 lines.append("=" * 72)
                                 lines.append(f"{labels['source_file']} {v.filename}")
-                                lines.append(f"{labels['exported']}    {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-                                lines.append(f"{labels['version']}     {ver.get('version_id', '?')} — {ver.get('title', 'Untitled')}")
-                                dur_str = format_duration_timecode(ver.get('total_duration', 0), 25)
+                                lines.append(
+                                    f"{labels['exported']}    {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                                )
+                                lines.append(
+                                    f"{labels['version']}     {ver.get('version_id', '?')} — {ver.get('title', 'Untitled')}"
+                                )
+                                dur_str = format_duration_timecode(ver.get("total_duration", 0), 25)
                                 lines.append(f"{labels['duration']}    {dur_str}")
                                 lines.append("")
 
-                                summary = ver.get('narrative_summary', '').strip()
+                                summary = ver.get("narrative_summary", "").strip()
                                 if summary:
                                     lines.append(labels["editorial_summary"])
                                     lines.append("-" * 72)
@@ -4250,8 +4964,8 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                     if isinstance(t, (int, float)):
                                         return float(t)
                                     if isinstance(t, str):
-                                        t = t.strip().replace(',', '.')
-                                        parts = t.split(':')
+                                        t = t.strip().replace(",", ".")
+                                        parts = t.split(":")
                                         if len(parts) == 3:
                                             h, m, s = parts
                                             return int(h) * 3600 + int(m) * 60 + float(s)
@@ -4270,24 +4984,29 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                 # even for composed/rewritten segments. (transcript_lang and labels were computed early.)
                                 segments_for_txt = ver.get("selected_segments", [])
                                 try:
-                                    from minicat.core.video import repair_journalist_segments_with_transcript
+                                    from minicat.core.video import (
+                                        repair_journalist_segments_with_transcript,
+                                    )
                                     from minicat.ui.app import get_state
+
                                     st = get_state()
                                     cat_root = getattr(st, "catalog_root", None) if st else None
                                     if cat_root and v.id:
-                                        segments_for_txt = repair_journalist_segments_with_transcript(
-                                            segments_for_txt, cat_root, v.id, transcript_lang
+                                        segments_for_txt = (
+                                            repair_journalist_segments_with_transcript(
+                                                segments_for_txt, cat_root, v.id, transcript_lang
+                                            )
                                         )
                                 except Exception:
                                     pass
 
                                 for i, seg in enumerate(segments_for_txt, 1):
                                     # Support canonical + legacy keys (now pre-repaired from trans .txt)
-                                    start = _to_seconds(seg.get('source_in') or seg.get('start', 0))
-                                    end = _to_seconds(seg.get('source_out') or seg.get('end', 0))
+                                    start = _to_seconds(seg.get("source_in") or seg.get("start", 0))
+                                    end = _to_seconds(seg.get("source_out") or seg.get("end", 0))
                                     dur = end - start
 
-                                    seg_text = (seg.get('text', '') or "").strip()
+                                    seg_text = (seg.get("text", "") or "").strip()
 
                                     # ALWAYS derive the displayed timecode prefix from the *actual* repaired
                                     # source range for this item. This makes the TC the SCRIPT shows for each
@@ -4297,23 +5016,33 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                     # values the user sees in the TRANSCRIPTION.
                                     try:
                                         from minicat.core.video import format_transcript_timecode
+
                                         time_prefix = format_transcript_timecode(
-                                            start, end,
+                                            start,
+                                            end,
                                             fps=getattr(v, "fps", None),
                                             base_timecode=getattr(v, "tc_start", None),
                                         )
                                     except Exception:
+
                                         def fmt(t):
                                             h = int(t // 3600)
                                             m = int((t % 3600) // 60)
                                             s = t % 60
-                                            return f"{h:02d}:{m:02d}:{s:05.2f}" if h > 0 else f"{m:02d}:{s:05.2f}"
+                                            return (
+                                                f"{h:02d}:{m:02d}:{s:05.2f}"
+                                                if h > 0
+                                                else f"{m:02d}:{s:05.2f}"
+                                            )
+
                                         time_prefix = f"[{fmt(start)} → {fmt(end)}]"
 
                                     lines.append(f"\n{i}. {time_prefix} ({dur:.2f}s)")
 
                                     lines.append(f"   {labels['text_label']}   {seg_text}")
-                                    lines.append(f"   {labels['reason_label']} {seg.get('reason', '')}")
+                                    lines.append(
+                                        f"   {labels['reason_label']} {seg.get('reason', '')}"
+                                    )
 
                                 lines.append("\n" + "=" * 72)
 
@@ -4325,6 +5054,7 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                 try:
                                     from minicat.core.video import get_transcription_txt_path
                                     from minicat.ui.app import get_state
+
                                     st = get_state()
                                     cat_root = getattr(st, "catalog_root", None) if st else None
                                     if cat_root and v.id:
@@ -4337,7 +5067,9 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                         for try_lang in try_langs:
                                             p = get_transcription_txt_path(v.id, cat_root, try_lang)
                                             if p.exists():
-                                                full_transcript_content = p.read_text(encoding="utf-8")
+                                                full_transcript_content = p.read_text(
+                                                    encoding="utf-8"
+                                                )
                                                 break
                                 except Exception:
                                     full_transcript_content = None
@@ -4348,29 +5080,41 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                     lines.append(full_transcript_content)
                                 else:
                                     # fallback to segments (old behavior) - these should be the ones for the chosen lang
-                                    original_segments = getattr(v, "transcription_segments", []) or []
+                                    original_segments = (
+                                        getattr(v, "transcription_segments", []) or []
+                                    )
                                     if original_segments:
                                         lines.append(f"\n{labels['full_transcript']}")
                                         lines.append("-" * 72)
 
                                         for seg in original_segments:
                                             # Support canonical + legacy keys
-                                            start = _to_seconds(seg.get('source_in') or seg.get('start', 0))
-                                            end = _to_seconds(seg.get('source_out') or seg.get('end', 0))
-                                            text = seg.get('text', '')
+                                            start = _to_seconds(
+                                                seg.get("source_in") or seg.get("start", 0)
+                                            )
+                                            end = _to_seconds(
+                                                seg.get("source_out") or seg.get("end", 0)
+                                            )
+                                            text = seg.get("text", "")
 
                                             def fmt(t):
                                                 h = int(t // 3600)
                                                 m = int((t % 3600) // 60)
                                                 s = t % 60
-                                                return f"{h:02d}:{m:02d}:{s:05.2f}" if h > 0 else f"{m:02d}:{s:05.2f}"
+                                                return (
+                                                    f"{h:02d}:{m:02d}:{s:05.2f}"
+                                                    if h > 0
+                                                    else f"{m:02d}:{s:05.2f}"
+                                                )
 
                                             lines.append(f"[{fmt(start)} → {fmt(end)}] {text}")
 
                                 content = "\n".join(lines)
                                 out_path.write_text(content, encoding="utf-8")
                                 if do_notify:
-                                    ui.notify(f"TXT exported to {out_path}", color="positive")  # full path
+                                    ui.notify(
+                                        f"TXT exported to {out_path}", color="positive"
+                                    )  # full path
                                 print(f"[AI Cut TXT Export] SUCCESS: {out_path}")
                                 return out_path
 
@@ -4379,6 +5123,7 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                     ui.notify(f"TXT Export failed: {ex}", color="negative")
                                 print(f"[AI Cut TXT Export] EXCEPTION: {ex}")
                                 import traceback
+
                                 traceback.print_exc()
                                 return None
 
@@ -4388,21 +5133,23 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                             - If the source is audio → WAV file with the selected segments
                             - If the source is video → MP4 file with the selected segments
                             """
+
                             # Robust notification helper (ui.timer(0, once=True) re-enters NiceGUI context).
                             # This function is attached directly to on_click (no manual create_task),
                             # so the initial call site has a valid slot and ui.timer() can be constructed.
                             def _safe_notify(message, **kwargs):
                                 def _do_notify():
                                     ui.notify(message, **kwargs)
+
                                 ui.timer(0, _do_notify, once=True)
 
                             try:
                                 from minicat.cli.main import _is_audio_file
 
-                                base = v.filename.rsplit('.', 1)[0]
-                                ver_id = ver.get('version_id', 'X')
-                                title_slug = (ver.get('title') or 'Cut').replace(' ', '_')[:40]
-                                dur = int(ver.get('total_duration', 0))
+                                base = v.filename.rsplit(".", 1)[0]
+                                ver_id = ver.get("version_id", "X")
+                                title_slug = (ver.get("title") or "Cut").replace(" ", "_")[:40]
+                                dur = int(ver.get("total_duration", 0))
 
                                 # Use per-export subfolder (consistent with other AI Journalist + Director exports)
                                 suggestion = f"AI_Journalist_{ver_id}_{title_slug}"
@@ -4411,20 +5158,36 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                 is_audio_source = _is_audio_file(Path(v.path))
 
                                 if is_audio_source:
-                                    out_name = f"{base}_AIJournalist_{ver_id}_{title_slug}_{dur}s.wav"
+                                    out_name = (
+                                        f"{base}_AIJournalist_{ver_id}_{title_slug}_{dur}s.wav"
+                                    )
                                     out_path = export_dir / out_name
 
-                                    _safe_notify(f"Exporting AI audio cut ({dur}s) as WAV...", color="info", duration=4)
+                                    _safe_notify(
+                                        f"Exporting AI audio cut ({dur}s) as WAV...",
+                                        color="info",
+                                        duration=4,
+                                    )
 
                                     def _do_audio():
                                         segs = ver.get("selected_segments", [])
                                         try:
-                                            from minicat.core.video import repair_journalist_segments_with_transcript
+                                            from minicat.core.video import (
+                                                repair_journalist_segments_with_transcript,
+                                            )
                                             from minicat.ui.app import get_state
+
                                             st = get_state()
-                                            cat_root = getattr(st, "catalog_root", None) if st else None
+                                            cat_root = (
+                                                getattr(st, "catalog_root", None) if st else None
+                                            )
                                             if cat_root and v.id:
-                                                segs = repair_journalist_segments_with_transcript(segs, cat_root, v.id, getattr(lang_select, "value", None) or "fi")
+                                                segs = repair_journalist_segments_with_transcript(
+                                                    segs,
+                                                    cat_root,
+                                                    v.id,
+                                                    getattr(lang_select, "value", None) or "fi",
+                                                )
                                         except Exception:
                                             pass
                                         video_core.export_ai_journalist_cut_audio(
@@ -4436,7 +5199,11 @@ def _show_ai_journalist_cut_dialog(v) -> None:
 
                                     rendered = await asyncio.to_thread(_do_audio)
                                     if rendered.exists() and rendered.stat().st_size > 1000:
-                                        _safe_notify(f"Audio clip exported → {rendered.name}", color="positive", duration=8)
+                                        _safe_notify(
+                                            f"Audio clip exported → {rendered.name}",
+                                            color="positive",
+                                            duration=8,
+                                        )
 
                                         # Generate one clean SRT that matches the AI cut exactly
                                         try:
@@ -4444,21 +5211,39 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                             srt_path = export_dir / srt_name
                                             timeline_segs = ai_journalist_cut_to_srt_segments(segs)
                                             if timeline_segs:
-                                                fps = getattr(v, "fps", None) or 25.0  # prefer source fps for correct frame alignment of sidecar SRT
-                                                srt_content = segments_to_srt(timeline_segs, strict_timing=True, fps=fps)
+                                                fps = (
+                                                    getattr(v, "fps", None) or 25.0
+                                                )  # prefer source fps for correct frame alignment of sidecar SRT
+                                                srt_content = segments_to_srt(
+                                                    timeline_segs, strict_timing=True, fps=fps
+                                                )
                                                 srt_path.write_text(srt_content, encoding="utf-8")
-                                                _safe_notify(f"Matching SRT saved → {srt_path.name}", color="positive", duration=6)
+                                                _safe_notify(
+                                                    f"Matching SRT saved → {srt_path.name}",
+                                                    color="positive",
+                                                    duration=6,
+                                                )
                                         except Exception as srt_ex:
-                                            print(f"[AI Audio Export] SRT generation failed (non-fatal): {srt_ex}")
+                                            print(
+                                                f"[AI Audio Export] SRT generation failed (non-fatal): {srt_ex}"
+                                            )
 
                                     # Sidecar narration voiceover if present (respect per-export choices like Director)
                                     narration_text = (ver.get("narration_text") or "").strip()
-                                    if narration_text and not use_titles.value and gen_vo_audio.value:
+                                    if (
+                                        narration_text
+                                        and not use_titles.value
+                                        and gen_vo_audio.value
+                                    ):
                                         try:
                                             nar_lang = ver.get("narration_language") or "en"
                                             nar_name = f"{base}_AIJournalist_{ver_id}_{title_slug}_{dur}s_Narration.wav"
                                             nar_path = export_dir / nar_name
-                                            _safe_notify("Generating narration voiceover audio (TTS)...", color="info", duration=3)
+                                            _safe_notify(
+                                                "Generating narration voiceover audio (TTS)...",
+                                                color="info",
+                                                duration=3,
+                                            )
                                             chosen_voice = (vo_voice.value or "").strip() or None
                                             generate_narration_audio_sync(
                                                 text=narration_text,
@@ -4466,42 +5251,75 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                                 output_path=nar_path,
                                                 voice=chosen_voice,
                                             )
-                                            _safe_notify(f"Narration voiceover audio saved → {nar_path.name}", color="positive", duration=6)
+                                            _safe_notify(
+                                                f"Narration voiceover audio saved → {nar_path.name}",
+                                                color="positive",
+                                                duration=6,
+                                            )
                                         except Exception as vo_ex:
-                                            _safe_notify(f"Voiceover generation failed: {vo_ex}", color="negative")
+                                            _safe_notify(
+                                                f"Voiceover generation failed: {vo_ex}",
+                                                color="negative",
+                                            )
                                             print(f"[AI Journalist Render VO] {vo_ex}")
                                     elif narration_text and use_titles.value:
-                                        _safe_notify("Narration as text only (script in TXT; no audio sidecar)", color="info")
+                                        _safe_notify(
+                                            "Narration as text only (script in TXT; no audio sidecar)",
+                                            color="info",
+                                        )
                                     else:
-                                        _safe_notify("Audio export completed but output file missing or empty", color="warning")
+                                        _safe_notify(
+                                            "Audio export completed but output file missing or empty",
+                                            color="warning",
+                                        )
                                 else:
-                                    out_name = f"{base}_AIJournalist_{ver_id}_{title_slug}_{dur}s.mp4"
+                                    out_name = (
+                                        f"{base}_AIJournalist_{ver_id}_{title_slug}_{dur}s.mp4"
+                                    )
                                     out_path = export_dir / out_name
 
-                                    _safe_notify(f"Rendering AI video cut ({dur}s) as MP4...", color="info", duration=4)
+                                    _safe_notify(
+                                        f"Rendering AI video cut ({dur}s) as MP4...",
+                                        color="info",
+                                        duration=4,
+                                    )
 
                                     def _do_video():
                                         segs = ver.get("selected_segments", [])
                                         try:
-                                            from minicat.core.video import repair_journalist_segments_with_transcript
+                                            from minicat.core.video import (
+                                                repair_journalist_segments_with_transcript,
+                                            )
                                             from minicat.ui.app import get_state
+
                                             st = get_state()
-                                            cat_root = getattr(st, "catalog_root", None) if st else None
+                                            cat_root = (
+                                                getattr(st, "catalog_root", None) if st else None
+                                            )
                                             if cat_root and v.id:
-                                                segs = repair_journalist_segments_with_transcript(segs, cat_root, v.id, getattr(lang_select, "value", None) or "fi")
+                                                segs = repair_journalist_segments_with_transcript(
+                                                    segs,
+                                                    cat_root,
+                                                    v.id,
+                                                    getattr(lang_select, "value", None) or "fi",
+                                                )
                                         except Exception:
                                             pass
                                         video_core.export_ai_journalist_cut_video(
                                             video=v,
                                             selected_segments=segs,
                                             output_path=out_path,
-                                            title=ver.get('title'),
+                                            title=ver.get("title"),
                                         )
                                         return out_path
 
                                     rendered = await asyncio.to_thread(_do_video)
                                     if rendered.exists() and rendered.stat().st_size > 1000:
-                                        _safe_notify(f"Video clip exported → {rendered.name}", color="positive", duration=8)
+                                        _safe_notify(
+                                            f"Video clip exported → {rendered.name}",
+                                            color="positive",
+                                            duration=8,
+                                        )
 
                                         # Generate one clean SRT that matches the AI cut exactly
                                         try:
@@ -4509,21 +5327,39 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                             srt_path = export_dir / srt_name
                                             timeline_segs = ai_journalist_cut_to_srt_segments(segs)
                                             if timeline_segs:
-                                                fps = getattr(v, "fps", None) or 25.0  # prefer source fps for correct frame alignment of sidecar SRT
-                                                srt_content = segments_to_srt(timeline_segs, strict_timing=True, fps=fps)
+                                                fps = (
+                                                    getattr(v, "fps", None) or 25.0
+                                                )  # prefer source fps for correct frame alignment of sidecar SRT
+                                                srt_content = segments_to_srt(
+                                                    timeline_segs, strict_timing=True, fps=fps
+                                                )
                                                 srt_path.write_text(srt_content, encoding="utf-8")
-                                                _safe_notify(f"Matching SRT saved → {srt_path.name}", color="positive", duration=6)
+                                                _safe_notify(
+                                                    f"Matching SRT saved → {srt_path.name}",
+                                                    color="positive",
+                                                    duration=6,
+                                                )
                                         except Exception as srt_ex:
-                                            print(f"[AI Video Export] SRT generation failed (non-fatal): {srt_ex}")
+                                            print(
+                                                f"[AI Video Export] SRT generation failed (non-fatal): {srt_ex}"
+                                            )
 
                                     # Sidecar narration voiceover if present (respect per-export choices like Director)
                                     narration_text = (ver.get("narration_text") or "").strip()
-                                    if narration_text and not use_titles.value and gen_vo_audio.value:
+                                    if (
+                                        narration_text
+                                        and not use_titles.value
+                                        and gen_vo_audio.value
+                                    ):
                                         try:
                                             nar_lang = ver.get("narration_language") or "en"
                                             nar_name = f"{base}_AIJournalist_{ver_id}_{title_slug}_{dur}s_Narration.wav"
                                             nar_path = export_dir / nar_name
-                                            _safe_notify("Generating narration voiceover audio (TTS)...", color="info", duration=3)
+                                            _safe_notify(
+                                                "Generating narration voiceover audio (TTS)...",
+                                                color="info",
+                                                duration=3,
+                                            )
                                             chosen_voice = (vo_voice.value or "").strip() or None
                                             generate_narration_audio_sync(
                                                 text=narration_text,
@@ -4531,18 +5367,32 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                                                 output_path=nar_path,
                                                 voice=chosen_voice,
                                             )
-                                            _safe_notify(f"Narration voiceover audio saved → {nar_path.name}", color="positive", duration=6)
+                                            _safe_notify(
+                                                f"Narration voiceover audio saved → {nar_path.name}",
+                                                color="positive",
+                                                duration=6,
+                                            )
                                         except Exception as vo_ex:
-                                            _safe_notify(f"Voiceover generation failed: {vo_ex}", color="negative")
+                                            _safe_notify(
+                                                f"Voiceover generation failed: {vo_ex}",
+                                                color="negative",
+                                            )
                                             print(f"[AI Journalist Render VO] {vo_ex}")
                                     elif narration_text and use_titles.value:
-                                        _safe_notify("Narration as text only (script in TXT; no audio sidecar)", color="info")
+                                        _safe_notify(
+                                            "Narration as text only (script in TXT; no audio sidecar)",
+                                            color="info",
+                                        )
                                     else:
-                                        _safe_notify("Video export completed but output file missing or empty", color="warning")
+                                        _safe_notify(
+                                            "Video export completed but output file missing or empty",
+                                            color="warning",
+                                        )
 
                             except Exception as ex:
                                 print(f"[AI Journalist Export New Clip] {ex}")
                                 import traceback
+
                                 traceback.print_exc()
                                 _safe_notify(f"Export as New Clip failed: {ex}", color="negative")
 
@@ -4555,19 +5405,22 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                             ).props("color=primary").classes("flex-1")
 
                             # Secondary: XML + TXT exports under one "Export File" button
-                            export_file_btn = ui.button(
-                                "Export File",
-                                icon="description",
-                            ).props("outline").tooltip("Export Premiere XML (bundles the rich AI JOURNALIST script/story TXT like Director) or standalone TXT")
+                            export_file_btn = (
+                                ui.button(
+                                    "Export File",
+                                    icon="description",
+                                )
+                                .props("outline")
+                                .tooltip(
+                                    "Export Premiere XML (bundles the rich AI JOURNALIST script/story TXT like Director) or standalone TXT"
+                                )
+                            )
                             with export_file_btn, ui.menu():
                                 ui.menu_item(
                                     "Premiere XML (+ rich script TXT)",
-                                    on_click=export_this_version_as_xml
+                                    on_click=export_this_version_as_xml,
                                 )
-                                ui.menu_item(
-                                    "TXT",
-                                    on_click=export_this_version_as_txt
-                                )
+                                ui.menu_item("TXT", on_click=export_this_version_as_txt)
 
         async def do_generate():
             generate_btn.disable()
@@ -4580,7 +5433,6 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                     status_label = ui.label("Preparing...").classes("text-sm text-grey-6")
 
             # Hoisted for scope
-            audio_for_listening = None
 
             try:
                 status_label.text = "Preparing transcript..."
@@ -4594,7 +5446,6 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                     return
 
                 # AI Journalist is strictly transcript-only. No audio is sent.
-                audio_for_listening = None
                 status_label.text = "Sending transcript to AI..."
                 await asyncio.sleep(0.03)
 
@@ -4651,7 +5502,9 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                 try:
                     _reattach_source_info(versions, segments)
                 except Exception as _repair_err:
-                    print(f"[AI Journalist] post-generation source time repair skipped: {_repair_err}")
+                    print(
+                        f"[AI Journalist] post-generation source time repair skipped: {_repair_err}"
+                    )
 
                 # Extra pass using the .txt sidecar (catches rewrite composed texts that _reattach
                 # on the in-memory segments list could not match exactly). _render_versions will
@@ -4659,9 +5512,11 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                 # correct numerics for any immediate use (audio render buttons etc).
                 try:
                     from minicat.core.video import repair_journalist_segments_with_transcript
+
                     cat_root = None
                     try:
                         from minicat.ui.app import get_state
+
                         st = get_state()
                         cat_root = getattr(st, "catalog_root", None) if st else None
                     except Exception:
@@ -4676,8 +5531,10 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                     if cat_root and clip_id:
                         for ver in versions:
                             if ver.get("selected_segments"):
-                                ver["selected_segments"] = repair_journalist_segments_with_transcript(
-                                    ver["selected_segments"], cat_root, clip_id, cur_lang
+                                ver["selected_segments"] = (
+                                    repair_journalist_segments_with_transcript(
+                                        ver["selected_segments"], cat_root, clip_id, cur_lang
+                                    )
                                 )
                 except Exception as _post_re:
                     print(f"[AI Journalist] post-gen transcript repair skipped: {_post_re}")
@@ -4690,7 +5547,9 @@ def _show_ai_journalist_cut_dialog(v) -> None:
                 results_container.clear()
                 with results_container:
                     ui.label(f"AI generation failed: {ex}").classes("text-negative")
-                    ui.label("Check the console for the raw response from Gemini (helps debugging).").classes("text-xs text-grey-6")
+                    ui.label(
+                        "Check the console for the raw response from Gemini (helps debugging)."
+                    ).classes("text-xs text-grey-6")
                 print(f"[AI Journalist Cut] Error: {ex}")
             finally:
                 generate_btn.enable()
@@ -4706,6 +5565,7 @@ def _show_ai_journalist_cut_dialog(v) -> None:
 # The Director receives one combined, labeled transcript (C1, C2...) from multiple clips.
 # ---------------------------------------------------------------------------
 
+
 def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
     """
     AI Director for multiple clips.
@@ -4720,7 +5580,6 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
     - Journalistic safety is absolute: only exact spoken words + accurate timings
       from the original transcriptions are ever used.
     """
-    from minicat.core import video as video_core
     from pathlib import Path as _Path  # avoid name clash
 
     if not selected_videos:
@@ -4730,7 +5589,10 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
     # Guard: every clip must have transcription
     for v in selected_videos:
         if not getattr(v, "transcription_segments", None):
-            ui.notify(f"Clip '{v.filename}' has no transcription. Transcribe all clips first.", color="warning")
+            ui.notify(
+                f"Clip '{v.filename}' has no transcription. Transcribe all clips first.",
+                color="warning",
+            )
             return
 
     # Build source registry (stable short labels for the AI and for UI)
@@ -4739,18 +5601,20 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
     # from <catalog>/transcriptions/ for the Director (those are output artifacts).
     sources: list[dict] = []
     for idx, v in enumerate(selected_videos):
-        label = f"C{idx+1}"  # C1, C2, ...
-        sources.append({
-            "index": idx,
-            "label": label,
-            "video": v,
-            "filename": v.filename,
-            "camera": getattr(v, "camera", None) or "",
-            "path": str(_Path(v.path).resolve()),
-            "duration": getattr(v, "duration", 0) or 0,
-            "segments": getattr(v, "transcription_segments", []) or [],
-            "original_language": getattr(v, "original_language", None),
-        })
+        label = f"C{idx + 1}"  # C1, C2, ...
+        sources.append(
+            {
+                "index": idx,
+                "label": label,
+                "video": v,
+                "filename": v.filename,
+                "camera": getattr(v, "camera", None) or "",
+                "path": str(_Path(v.path).resolve()),
+                "duration": getattr(v, "duration", 0) or 0,
+                "segments": getattr(v, "transcription_segments", []) or [],
+                "original_language": getattr(v, "original_language", None),
+            }
+        )
 
     # Determine the primary language from the clips' technical metadata
     # (preferred over auto-detection by Gemini)
@@ -4769,90 +5633,150 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
     dlg = ui.dialog()
     with dlg, ui.card().classes("w-[820px] max-h-[90vh] overflow-auto"):
         ui.label("AI Director — Build Story").classes("text-h5 mb-1")
-        ui.label(f"Intercutting {len(sources)} clips into narrative versions").classes("text-sm text-grey-6 mb-2")
+        ui.label(f"Intercutting {len(sources)} clips into narrative versions").classes(
+            "text-sm text-grey-6 mb-2"
+        )
 
         # List of participating clips (compact)
         with ui.column().classes("mb-3 text-xs"):
             for s in sources:
-                dur_str = format_duration_timecode(s['duration'], 25)
+                dur_str = format_duration_timecode(s["duration"], 25)
                 ui.label(f"{s['label']}: {s['filename']}  ({dur_str})").classes("font-mono")
 
             if primary_language:
-                ui.label(f"Detected original language: {primary_language} (will be used for narration)").classes("text-blue-400 mt-1")
+                ui.label(
+                    f"Detected original language: {primary_language} (will be used for narration)"
+                ).classes("text-blue-400 mt-1")
 
         # Controls (same spirit as single-clip)
         # Max duration can now go up to the full combined length of the selected clips
         with ui.row().classes("gap-4 items-end w-full"):
-            num_versions = ui.number("Versions", value=2, min=1, max=3).props("dense").classes("w-20")
+            num_versions = (
+                ui.number("Versions", value=2, min=1, max=3).props("dense").classes("w-20")
+            )
 
-            min_dur = ui.number("Min duration (s)", value=30, min=5, max=default_max, step=5).props("dense").classes("w-28")
-            max_dur = ui.number("Max duration (s)", value=min(180, default_max), min=10, max=default_max, step=5).props("dense").classes("w-28")
+            min_dur = (
+                ui.number("Min duration (s)", value=30, min=5, max=default_max, step=5)
+                .props("dense")
+                .classes("w-28")
+            )
+            max_dur = (
+                ui.number(
+                    "Max duration (s)", value=min(180, default_max), min=10, max=default_max, step=5
+                )
+                .props("dense")
+                .classes("w-28")
+            )
 
-        purpose = ui.select(
-            {
-                "News Package": "News Package (tight broadcast package: strong open, key soundbites, closer)",
-                "Social Media Teaser": "Social Media Teaser (punchy curiosity hook — arresting first 8 seconds)",
-                "Best Soundbites / Quotes": "Best Soundbites / Quotes (most quotable lines, intercut for maximum impact)",
-                "Emotional / Human Story": "Emotional / Human Story (personal stakes & emotional contrast between voices)",
-                "In-depth Highlight": "In-depth Highlight (deeper synthesis of key or surprising territory)",
-                # new 2026
-                "Investigative Cold Open": "Investigative Cold Open (high-suspense hook: facts + cliffhangers into the mystery)",
-                "Expert Manifesto / Manifesto Call": "Expert Manifesto / Manifesto Call (mission-driven claims to collective call-to-action)",
-                "Character Retrospective": "Character Retrospective (nostalgic, reflective look back on life, career or era)",
-                "Social Jump-Cut Strip": "Social Jump-Cut Strip (ultra-aggressive TikTok/Shorts bursts — zero dead air)",
-                "Three-Act Underdog Arc": "Three-Act Underdog Arc (strict 3-act underdog journey: struggle → epiphany → triumph)",
-            },
-            value="News Package", label="Purpose"
-        ).props("dense").classes("w-full mt-2")
+        purpose = (
+            ui.select(
+                {
+                    "News Package": "News Package (tight broadcast package: strong open, key soundbites, closer)",
+                    "Social Media Teaser": "Social Media Teaser (punchy curiosity hook — arresting first 8 seconds)",
+                    "Best Soundbites / Quotes": "Best Soundbites / Quotes (most quotable lines, intercut for maximum impact)",
+                    "Emotional / Human Story": "Emotional / Human Story (personal stakes & emotional contrast between voices)",
+                    "In-depth Highlight": "In-depth Highlight (deeper synthesis of key or surprising territory)",
+                    # new 2026
+                    "Investigative Cold Open": "Investigative Cold Open (high-suspense hook: facts + cliffhangers into the mystery)",
+                    "Expert Manifesto / Manifesto Call": "Expert Manifesto / Manifesto Call (mission-driven claims to collective call-to-action)",
+                    "Character Retrospective": "Character Retrospective (nostalgic, reflective look back on life, career or era)",
+                    "Social Jump-Cut Strip": "Social Jump-Cut Strip (ultra-aggressive TikTok/Shorts bursts — zero dead air)",
+                    "Three-Act Underdog Arc": "Three-Act Underdog Arc (strict 3-act underdog journey: struggle → epiphany → triumph)",
+                },
+                value="News Package",
+                label="Purpose",
+            )
+            .props("dense")
+            .classes("w-full mt-2")
+        )
 
-        tone = ui.select(
-            {
-                "newsroom": "Newsroom (tight & factual)",
-                "flexible": "Flexible / Creative (atmospheric & juxtapositions)",
-                "documentary": "Documentary (story-driven & atmospheric)",
-                "corporate": "Corporate (professional & polished)",
-                "commercial": "Commercial (persuasive & brand-driven)",
-                "rewrite": "Verbatim Scriptwriter (new story across clips)",
-                # new 2026 creative directorial styles
-                "investigative_hook": "Investigative Hook (cinematic, cliffhangers)",
-                "masterclass": "Masterclass (authoritative, long-form argument)",
-                "confessional": "Confessional (vulnerable, intimate, preserves stumbles)",
-                "engagement_bomb": "Engagement Bomb (ultra-fast TikTok/Shorts)",
-                "subversive": "Subversive (witty, ironic, humanizing)",
-                "visual_poem": "Visual Poem (atmospheric, rhythmic, musical)",
-                "manifesto": "Manifesto (inspirational, mobilizing call-to-action)",
-                "underdog": "Underdog (strict 3-act: struggle → pivot → triumph)",
-                "analytical": "Analytical (cause-effect, data, objective)",
-                "legacy": "Legacy (warm, wistful, reflective past-tense)",
-            },
-            value="newsroom", label="Tone / Role"
-        ).props("dense").classes("w-full mt-1")
+        tone = (
+            ui.select(
+                {
+                    "newsroom": "Newsroom (tight & factual)",
+                    "flexible": "Flexible / Creative (atmospheric & juxtapositions)",
+                    "documentary": "Documentary (story-driven & atmospheric)",
+                    "corporate": "Corporate (professional & polished)",
+                    "commercial": "Commercial (persuasive & brand-driven)",
+                    "rewrite": "Verbatim Scriptwriter (new story across clips)",
+                    # new 2026 creative directorial styles
+                    "investigative_hook": "Investigative Hook (cinematic, cliffhangers)",
+                    "masterclass": "Masterclass (authoritative, long-form argument)",
+                    "confessional": "Confessional (vulnerable, intimate, preserves stumbles)",
+                    "engagement_bomb": "Engagement Bomb (ultra-fast TikTok/Shorts)",
+                    "subversive": "Subversive (witty, ironic, humanizing)",
+                    "visual_poem": "Visual Poem (atmospheric, rhythmic, musical)",
+                    "manifesto": "Manifesto (inspirational, mobilizing call-to-action)",
+                    "underdog": "Underdog (strict 3-act: struggle → pivot → triumph)",
+                    "analytical": "Analytical (cause-effect, data, objective)",
+                    "legacy": "Legacy (warm, wistful, reflective past-tense)",
+                },
+                value="newsroom",
+                label="Tone / Role",
+            )
+            .props("dense")
+            .classes("w-full mt-1")
+        )
 
-        clean_fillers = ui.checkbox("Remove filler words (cleaner sentences)", value=False).props("dense").classes("mt-2")
+        clean_fillers = (
+            ui.checkbox("Remove filler words (cleaner sentences)", value=False)
+            .props("dense")
+            .classes("mt-2")
+        )
 
-        narration_style = ui.select(
-            {
-                None: "No narration / voiceover script",
-                "omniscient": "Omniscient (3rd-person journalistic — objective bridges, context, balance)",
-                "subjective": "Subjective (1st-person reflective / essay-film style)",
-                "explainer": "Explainer (high-energy, punchy short-form / social hook voice)",
-            },
-            value=None,
-            label="Narration / Voiceover Style (optional)"
-        ).props("dense").classes("w-full mt-2")
+        narration_style = (
+            ui.select(
+                {
+                    None: "No narration / voiceover script",
+                    "omniscient": "Omniscient (3rd-person journalistic — objective bridges, context, balance)",
+                    "subjective": "Subjective (1st-person reflective / essay-film style)",
+                    "explainer": "Explainer (high-energy, punchy short-form / social hook voice)",
+                },
+                value=None,
+                label="Narration / Voiceover Style (optional)",
+            )
+            .props("dense")
+            .classes("w-full mt-2")
+        )
 
         # Narration budget controls for Director (applies to the discrete bridges in narrative_elements)
         with ui.row().classes("gap-2 mt-1"):
-            d_narr_min_sec = ui.number("Narration min (s)", value=10, min=0, step=5).props("dense").classes("w-28").tooltip("Min total spoken seconds across all bridges in the story")
-            d_narr_max_sec = ui.number("Narration max (s)", value=90, min=0, step=5).props("dense").classes("w-28").tooltip("Max total spoken seconds across all bridges")
-            d_narr_min_b = ui.number("Min bridges", value=2, min=0, max=15).props("dense").classes("w-24").tooltip("Minimum number of discrete narration bridges to insert")
-            d_narr_max_b = ui.number("Max bridges", value=6, min=0, max=15).props("dense").classes("w-24").tooltip("Maximum number of discrete narration bridges")
+            d_narr_min_sec = (
+                ui.number("Narration min (s)", value=10, min=0, step=5)
+                .props("dense")
+                .classes("w-28")
+                .tooltip("Min total spoken seconds across all bridges in the story")
+            )
+            d_narr_max_sec = (
+                ui.number("Narration max (s)", value=90, min=0, step=5)
+                .props("dense")
+                .classes("w-28")
+                .tooltip("Max total spoken seconds across all bridges")
+            )
+            d_narr_min_b = (
+                ui.number("Min bridges", value=2, min=0, max=15)
+                .props("dense")
+                .classes("w-24")
+                .tooltip("Minimum number of discrete narration bridges to insert")
+            )
+            d_narr_max_b = (
+                ui.number("Max bridges", value=6, min=0, max=15)
+                .props("dense")
+                .classes("w-24")
+                .tooltip("Maximum number of discrete narration bridges")
+            )
 
-        generate_btn = ui.button("Generate Versions (AI Director)", icon="auto_awesome", color="primary").classes("mt-4 w-full")
+        generate_btn = ui.button(
+            "Generate Versions (AI Director)", icon="auto_awesome", color="primary"
+        ).classes("mt-4 w-full")
 
         with ui.column().classes("w-full items-center mt-1"):
-            ui.label("The Director works from the combined labeled transcripts only (no audio is sent).").classes("text-xs text-grey-5 text-center")
-            ui.label("Choosing a narration style tells the AI to generate purposeful, sparing voiceover bridges in that linguistic perspective (see Text-to-Speech settings for style details). Bridges are inserted only where they add real value (every 3-5 clips or at key transitions).").classes("text-xs text-blue-400 text-center")
+            ui.label(
+                "The Director works from the combined labeled transcripts only (no audio is sent)."
+            ).classes("text-xs text-grey-5 text-center")
+            ui.label(
+                "Choosing a narration style tells the AI to generate purposeful, sparing voiceover bridges in that linguistic perspective (see Text-to-Speech settings for style details). Bridges are inserted only where they add real value (every 3-5 clips or at key transitions)."
+            ).classes("text-xs text-blue-400 text-center")
 
         results_container = ui.column().classes("w-full mt-4")
 
@@ -4884,15 +5808,17 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                     lines.append(f"{tc} {text}")
 
                     # Augmented segment that travels with the AI output
-                    flat_segments.append({
-                        "source_in": start_f,
-                        "source_out": end_f,
-                        "text": text,
-                        "source_label": s["label"],
-                        "source_filename": s["filename"],
-                        "source_path": s["path"],
-                        "source_clip_index": s["index"],
-                    })
+                    flat_segments.append(
+                        {
+                            "source_in": start_f,
+                            "source_out": end_f,
+                            "text": text,
+                            "source_label": s["label"],
+                            "source_filename": s["filename"],
+                            "source_path": s["path"],
+                            "source_clip_index": s["index"],
+                        }
+                    )
             return "\n".join(lines).strip(), flat_segments
 
         def _render_multi_versions(versions: list[dict]):
@@ -4901,10 +5827,12 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
             # use the authoritative verbatim ranges for combined narrative beats within a source).
             try:
                 from minicat.core.video import repair_director_version_with_transcripts
+
                 cat_root = None
                 vids = []
                 try:
                     from minicat.ui.app import get_state
+
                     st = get_state()
                     cat_root = getattr(st, "catalog_root", None) if st else None
                     vids = getattr(st, "videos", None) or []
@@ -4920,17 +5848,25 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
             with results_container:
                 for version in versions:
                     with ui.card().classes("w-full mb-3 border"):
-                        header = f"{version.get('version_id', '?')} — {version.get('title', 'Untitled')}"
+                        header = (
+                            f"{version.get('version_id', '?')} — {version.get('title', 'Untitled')}"
+                        )
                         with ui.row().classes("items-center gap-2"):
                             ui.label(header).classes("text-base font-semibold")
                             if version.get("narration_text"):
                                 lang = version.get("narration_language", "")
-                                tooltip = f"Narration script available ({lang}) — voiceover can be exported with the XML" if lang else "Narration script available — voiceover can be exported with the XML"
+                                tooltip = (
+                                    f"Narration script available ({lang}) — voiceover can be exported with the XML"
+                                    if lang
+                                    else "Narration script available — voiceover can be exported with the XML"
+                                )
                                 ui.label("🎙️").classes("text-lg").tooltip(tooltip)
 
                         dur = version.get("total_duration", 0)
                         dur_str = format_duration_timecode(dur, 25)
-                        ui.label(f"Duration: {dur_str}  •  Multi-source cut").classes("text-xs text-grey-5 mb-2")
+                        ui.label(f"Duration: {dur_str}  •  Multi-source cut").classes(
+                            "text-xs text-grey-5 mb-2"
+                        )
 
                         summary = version.get("narrative_summary", "")
                         if summary:
@@ -4946,13 +5882,20 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                         # provides the NARRATION BRIDGE (TTS) and will be displayed in bridge styling below.
                         narration = version.get("narration_text", "").strip()
                         has_typed_narration_in_elements = bool(narrative_elements) and any(
-                            (item or {}).get("type") == "narration" for item in (narrative_elements or [])
+                            (item or {}).get("type") == "narration"
+                            for item in (narrative_elements or [])
                         )
-                        if narration and (not bool(narrative_elements) or has_typed_narration_in_elements):
+                        if narration and (
+                            not bool(narrative_elements) or has_typed_narration_in_elements
+                        ):
                             lang = version.get("narration_language")
                             lang_label = f" ({lang})" if lang else ""
-                            with ui.card().classes("w-full bg-blue-900/10 border border-blue-700 mb-2 p-2"):
-                                ui.label(f"AI Narration / Voiceover Script{lang_label}").classes("text-sm font-semibold text-blue-300 mb-1")
+                            with ui.card().classes(
+                                "w-full bg-blue-900/10 border border-blue-700 mb-2 p-2"
+                            ):
+                                ui.label(f"AI Narration / Voiceover Script{lang_label}").classes(
+                                    "text-sm font-semibold text-blue-300 mb-1"
+                                )
                                 ui.markdown(narration).classes("text-sm")
 
                         def make_delete_handler(ver, idx):
@@ -4960,6 +5903,7 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                                 if 0 <= idx < len(ver.get("selected_segments", [])):
                                     del ver["selected_segments"][idx]
                                     _render_multi_versions(versions)
+
                             return handler
 
                         if narrative_elements:
@@ -4972,24 +5916,40 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                                     tc = f"{s:.1f}s → {e:.1f}s"
                                     with ui.column().classes("w-full mb-1"):
                                         with ui.row().classes("items-center gap-2 text-sm"):
-                                            ui.label(f"[{src_label}]").classes("font-mono text-[10px] px-1.5 py-0.5 bg-amber-900/60 rounded text-amber-300 shrink-0")
+                                            ui.label(f"[{src_label}]").classes(
+                                                "font-mono text-[10px] px-1.5 py-0.5 bg-amber-900/60 rounded text-amber-300 shrink-0"
+                                            )
                                             ui.label(tc).classes("font-mono text-xs w-28 shrink-0")
-                                            ui.label((item.get("text") or "")[:90]).classes("flex-1 truncate")
+                                            ui.label((item.get("text") or "")[:90]).classes(
+                                                "flex-1 truncate"
+                                            )
                                 elif item.get("type") == "narration":
-                                    with ui.card().classes("w-full bg-blue-900/15 border-l-2 border-blue-500 mb-2 p-2"):
+                                    with ui.card().classes(
+                                        "w-full bg-blue-900/15 border-l-2 border-blue-500 mb-2 p-2"
+                                    ):
                                         provider_name = get_tts_provider_display_name()
-                                        ui.label(f"🎙️ Narration bridge • {provider_name}").classes("text-xs font-semibold text-blue-300 mb-0.5")
-                                        ui.markdown(item.get("text", "")).classes("text-sm text-blue-100")
+                                        ui.label(f"🎙️ Narration bridge • {provider_name}").classes(
+                                            "text-xs font-semibold text-blue-300 mb-0.5"
+                                        )
+                                        ui.markdown(item.get("text", "")).classes(
+                                            "text-sm text-blue-100"
+                                        )
 
                             # Treat AI Narration / Voiceover Script exactly like NARRATION BRIDGE (TTS):
                             # if narrative_elements was provided but had no explicit "narration" items,
                             # the script (narration_text) IS the bridge content for TTS/audio/XML.
-                            if narrative_elements and not any((i or {}).get("type") == "narration" for i in narrative_elements):
+                            if narrative_elements and not any(
+                                (i or {}).get("type") == "narration" for i in narrative_elements
+                            ):
                                 script = (version.get("narration_text") or "").strip()
                                 if script:
-                                    with ui.card().classes("w-full bg-blue-900/15 border-l-2 border-blue-500 mb-2 p-2"):
+                                    with ui.card().classes(
+                                        "w-full bg-blue-900/15 border-l-2 border-blue-500 mb-2 p-2"
+                                    ):
                                         provider_name = get_tts_provider_display_name()
-                                        ui.label(f"🎙️ Narration bridge (AI Narration / Voiceover Script) • {provider_name}").classes("text-xs font-semibold text-blue-300 mb-0.5")
+                                        ui.label(
+                                            f"🎙️ Narration bridge (AI Narration / Voiceover Script) • {provider_name}"
+                                        ).classes("text-xs font-semibold text-blue-300 mb-0.5")
                                         ui.markdown(script).classes("text-sm text-blue-100")
                         else:
                             # Legacy display
@@ -4997,23 +5957,42 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                                 with ui.column().classes("w-full mb-2"):
                                     s = seg.get("source_in") or seg.get("start", 0)
                                     e = seg.get("source_out") or seg.get("end", 0)
-                                    src_label = seg.get("source_label") or seg.get("source_filename") or "Unknown source"
+                                    src_label = (
+                                        seg.get("source_label")
+                                        or seg.get("source_filename")
+                                        or "Unknown source"
+                                    )
                                     tc = f"{s:.1f}s → {e:.1f}s"
 
                                     with ui.row().classes("items-center gap-2 text-sm"):
-                                        ui.label(f"[{src_label}]").classes("font-mono text-[10px] px-1.5 py-0.5 bg-zinc-800 rounded text-amber-400 shrink-0")
+                                        ui.label(f"[{src_label}]").classes(
+                                            "font-mono text-[10px] px-1.5 py-0.5 bg-zinc-800 rounded text-amber-400 shrink-0"
+                                        )
                                         ui.label(tc).classes("font-mono text-xs w-28 shrink-0")
-                                        ui.label((seg.get("text") or "")[:80]).classes("flex-1 truncate")
+                                        ui.label((seg.get("text") or "")[:80]).classes(
+                                            "flex-1 truncate"
+                                        )
 
                                     reason = (seg.get("reason") or "").strip()
                                     if reason:
-                                        ui.label(f"   → {reason}").classes("text-xs text-grey-5 ml-1 italic")
+                                        ui.label(f"   → {reason}").classes(
+                                            "text-xs text-grey-5 ml-1 italic"
+                                        )
 
-                                    ui.button(icon="delete", on_click=make_delete_handler(version, idx)).props("size=xs flat color=negative").classes("self-end")
+                                    ui.button(
+                                        icon="delete", on_click=make_delete_handler(version, idx)
+                                    ).props("size=xs flat color=negative").classes("self-end")
 
                         # Export row (multi-aware where implemented)
                         # Thin compatibility shell. Real work lives in the three dedicated exporters.
-                        def _legacy_export_multi_xml(ver=version, generate_voiceover: bool = True, voiceover_language: str = "en", narration_as_titles: bool = False, voiceover_voice: str | None = None, pregenerated_vo_files: list[dict] | None = None):
+                        def _legacy_export_multi_xml(
+                            ver=version,
+                            generate_voiceover: bool = True,
+                            voiceover_language: str = "en",
+                            narration_as_titles: bool = False,
+                            voiceover_voice: str | None = None,
+                            pregenerated_vo_files: list[dict] | None = None,
+                        ):
                             """
                             Multi-source XMEML export.
                             - generate_voiceover=True  → generates audio bridges (WAV stereo 44100Hz for Piper local / MP3 for Google) + dedicated voiceover audio track for the AI Narration / Voiceover Script
@@ -5034,14 +6013,18 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                                         source_paths[p] = seg.get("source_filename", _Path(p).name)
 
                                 if not source_paths:
-                                    ui.notify("No source file paths found in the AI segments", color="warning")
+                                    ui.notify(
+                                        "No source file paths found in the AI segments",
+                                        color="warning",
+                                    )
                                     return
 
                                 # Always land in a fresh subfolder inside default library
-                                suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:40] }"
+                                suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:40]}"
                                 export_dir = create_export_subfolder(suggestion)
-                                raw_name = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:30] }"
+                                raw_name = f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:30]}"
                                 from minicat.core.settings import sanitize_for_filesystem
+
                                 name = sanitize_for_filesystem(raw_name, max_len=80)
                                 out_name = f"{name}.xml"
                                 out_path = export_dir / out_name
@@ -5052,24 +6035,36 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                                     # All segments from the same source file → use the high-quality single-source XMEML
                                     cut_segments = []
                                     for seg in segs:
-                                        cut_segments.append({
-                                            "source_in": seg.get("source_in") or seg.get("start"),
-                                            "source_out": seg.get("source_out") or seg.get("end"),
-                                            "text": seg.get("text", ""),
-                                            "reason": seg.get("reason", "")
-                                        })
+                                        cut_segments.append(
+                                            {
+                                                "source_in": seg.get("source_in")
+                                                or seg.get("start"),
+                                                "source_out": seg.get("source_out")
+                                                or seg.get("end"),
+                                                "text": seg.get("text", ""),
+                                                "reason": seg.get("reason", ""),
+                                            }
+                                        )
 
-                                    from minicat.ai.xmeml_exporter import generate_xmeml, get_video_timebase
+                                    from minicat.ai.xmeml_exporter import (
+                                        generate_xmeml,
+                                        get_video_timebase,
+                                    )
+
                                     detected_timebase = get_video_timebase(source_list[0])
                                     generate_xmeml(
                                         cut_segments=cut_segments,
                                         source_video_path=source_list[0],
                                         output_path=out_path,
                                         sequence_name=f"AI Multi Cut - {ver.get('title', ver.get('version_id'))}",
-                                        narrative_summary=ver.get('narrative_summary'),
+                                        narrative_summary=ver.get("narrative_summary"),
                                         timebase=detected_timebase,
                                     )
-                                    ui.notify(f"XML + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported (single-source high quality) → {out_path.name}", color="positive", duration=6)
+                                    ui.notify(
+                                        f"XML + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported (single-source high quality) → {out_path.name}",
+                                        color="positive",
+                                        duration=6,
+                                    )
                                     # script TXT is now exported centrally by the * _exporter functions when they create/use the subfolder
                                 else:
                                     # Multi-source + narration/voiceover path is now fully owned by
@@ -5090,6 +6085,7 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                                 ui.notify(f"Multi XML export failed: {ex}", color="negative")
                                 print(f"[Multi XML Export] {ex}")
                                 import traceback
+
                                 traceback.print_exc()
 
                         # (the _show_ai_director_xml_export_dialog was hoisted to module level above
@@ -5112,13 +6108,18 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                                     # "AI DIRECTOR — MULTI-CLIP SCRIPT.txt" use exact times from the per-source
                                     # trans .txt sidecars (full spans for any combined narrative beats).
                                     try:
-                                        from minicat.core.video import repair_director_version_with_transcripts
+                                        from minicat.core.video import (
+                                            repair_director_version_with_transcripts,
+                                        )
                                         from minicat.ui.app import get_state
+
                                         st = get_state()
                                         cat_root = getattr(st, "catalog_root", None) if st else None
                                         vids = getattr(st, "videos", None) or []
                                         if cat_root:
-                                            ver = repair_director_version_with_transcripts(ver, cat_root, vids)
+                                            ver = repair_director_version_with_transcripts(
+                                                ver, cat_root, vids
+                                            )
                                     except Exception:
                                         pass
 
@@ -5132,7 +6133,7 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                                         # narration's own language (e.g. "fi") from the Director so the right
                                         # TTS model/voice is chosen for "AI Narration / Voiceover Script (fi)".
                                         voiceover_language = ver.get("narration_language") or "en"
-                                        suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:40] }"
+                                        suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:40]}"
                                         target_dir = create_export_subfolder(suggestion)
                                         out = await asyncio.to_thread(
                                             lambda: narrative_vo_exporter.export_narrative_vo_xmeml(
@@ -5144,33 +6145,52 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                                         )
                                         if out:
                                             try:
-                                                nbridges = len([b for b in (get_narrative_sequence(ver) or []) if b.get("type") == "narration"])
+                                                len(
+                                                    [
+                                                        b
+                                                        for b in (get_narrative_sequence(ver) or [])
+                                                        if b.get("type") == "narration"
+                                                    ]
+                                                )
                                             except Exception:
-                                                nbridges = 0
+                                                pass
                                             msg = f"XML + voiceovers + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported → {out.name} (in {target_dir.name})"
                                             ui.notify(msg, color="positive", duration=8)
                                         else:
-                                            ui.notify("Multi XML export returned no file (see console)", color="warning")
+                                            ui.notify(
+                                                "Multi XML export returned no file (see console)",
+                                                color="warning",
+                                            )
                                     else:
-                                        suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:40] }"
+                                        suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:40]}"
                                         target_dir = create_export_subfolder(suggestion)
                                         out = await asyncio.to_thread(
-                                            lambda: multi_xmeml_exporter.export_ai_director_multi_xmeml(ver, output_dir=target_dir)
+                                            lambda: (
+                                                multi_xmeml_exporter.export_ai_director_multi_xmeml(
+                                                    ver, output_dir=target_dir
+                                                )
+                                            )
                                         )
                                         if out:
-                                            ui.notify(f"XML + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported → {out.name} (in {target_dir.name})", color="positive", duration=6)
+                                            ui.notify(
+                                                f"XML + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported → {out.name} (in {target_dir.name})",
+                                                color="positive",
+                                                duration=6,
+                                            )
                                         else:
-                                            ui.notify("Multi XML export returned no file (see console)", color="warning")
+                                            ui.notify(
+                                                "Multi XML export returned no file (see console)",
+                                                color="warning",
+                                            )
                                 except Exception as ex:
                                     ui.notify(f"Multi XML export failed: {ex}", color="negative")
                                     print(f"[Multi XML Export] {ex}")
                                     import traceback
+
                                     traceback.print_exc()
 
                             ui.button(
-                                "Export XML",
-                                icon="description",
-                                on_click=_export_basic_multi
+                                "Export XML", icon="description", on_click=_export_basic_multi
                             ).props("outline").classes("flex-1").tooltip(
                                 "Export standard multi-source XMEML for AI Director. If the version has an AI Narration / Voiceover Script, it will be exported as audio (TTS) and added as a track in the XML."
                             )
@@ -5178,24 +6198,29 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                             def _save_this_story(v=version):
                                 p = save_ai_director_story(v)
                                 if p:
-                                    ui.notify(f"Story saved as {p.name}. Use the “Load Story” button in the top bar to re-open it later for XML + Voiceover export — no need to re-run the AI Director.", color="positive", duration=10)
+                                    ui.notify(
+                                        f"Story saved as {p.name}. Use the “Load Story” button in the top bar to re-open it later for XML + Voiceover export — no need to re-run the AI Director.",
+                                        color="positive",
+                                        duration=10,
+                                    )
                                 else:
-                                    ui.notify("Failed to save story (see console)", color="negative")
+                                    ui.notify(
+                                        "Failed to save story (see console)", color="negative"
+                                    )
 
-                            ui.button(
-                                "Save Story",
-                                icon="save",
-                                on_click=_save_this_story
-                            ).props("outline").classes("flex-1").tooltip(
+                            ui.button("Save Story", icon="save", on_click=_save_this_story).props(
+                                "outline"
+                            ).classes("flex-1").tooltip(
                                 "Save this AI Director story (the cut + any narrations) so it can be reloaded later for EXPORT XML + VOICE OVERS"
                             )
 
                             # Additional options for narration (text titles only, or custom VO settings).
                             # Note: the main "Export XML" button above now automatically voices the AI Narration / Voiceover Script (if present) and includes the audio in the XML.
                             if has_narration:
+
                                 async def _export_text_titles(ver=version):
                                     try:
-                                        suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:40] }"
+                                        suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:40]}"
                                         target_dir = create_export_subfolder(suggestion)
                                         out = await asyncio.to_thread(
                                             lambda: narrative_vo_exporter.export_narrative_vo_xmeml(
@@ -5203,19 +6228,28 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                                             )
                                         )
                                         if out:
-                                            ui.notify(f"XML + Text Titles exported → {out.name} (in {target_dir.name})", color="positive", duration=6)
+                                            ui.notify(
+                                                f"XML + Text Titles exported → {out.name} (in {target_dir.name})",
+                                                color="positive",
+                                                duration=6,
+                                            )
                                         else:
-                                            ui.notify("Text titles XML export returned no file (see console)", color="warning")
+                                            ui.notify(
+                                                "Text titles XML export returned no file (see console)",
+                                                color="warning",
+                                            )
                                     except Exception as ex:
-                                        ui.notify(f"XML + Text Titles export failed: {ex}", color="negative")
+                                        ui.notify(
+                                            f"XML + Text Titles export failed: {ex}",
+                                            color="negative",
+                                        )
                                         print(f"[XML + Text Titles Export] {ex}")
                                         import traceback
+
                                         traceback.print_exc()
 
                                 ui.button(
-                                    "XML + Text Titles",
-                                    icon="title",
-                                    on_click=_export_text_titles
+                                    "XML + Text Titles", icon="title", on_click=_export_text_titles
                                 ).props("outline").classes("flex-1").tooltip(
                                     "Export XML with narration bridges as visible on-screen <title> elements (no audio)"
                                 )
@@ -5223,22 +6257,26 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                                 ui.button(
                                     "XML + Voiceover Audio",
                                     icon="mic",
-                                    on_click=lambda v=version: _show_ai_director_xml_export_dialog(v)
+                                    on_click=lambda v=version: _show_ai_director_xml_export_dialog(
+                                        v
+                                    ),
                                 ).props("outline").tooltip(
                                     "Export XML with generated voiceover audio (WAV for local Piper / MP3 for Google) on a dedicated audio track at correct positions from the AI Narration / Voiceover Script"
                                 )
 
-                                ui.label("🎙️ Narration ready").classes("text-xs text-blue-400 self-center ml-2")
+                                ui.label("🎙️ Narration ready").classes(
+                                    "text-xs text-blue-400 self-center ml-2"
+                                )
 
                             def export_multi_txt(ver=version):
                                 """Wrapper for the standalone button (writes to default dir with slug name)."""
                                 export_ai_director_multi_clip_script(ver)
 
-                            def export_multi_txt(ver=version):
-                                """Wrapper for the standalone button (writes to default dir with slug name)."""
-                                export_ai_director_multi_clip_script(ver)
-
-                            ui.button("Export as TXT Script", icon="description", on_click=export_multi_txt).props("outline")
+                            ui.button(
+                                "Export as TXT Script",
+                                icon="description",
+                                on_click=export_multi_txt,
+                            ).props("outline")
 
         async def do_generate_multi():
             generate_btn.disable()
@@ -5248,7 +6286,9 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
             with results_container:
                 with ui.row().classes("items-center gap-3 justify-center w-full"):
                     ui.spinner("dots").classes("mr-2")
-                    status_label = ui.label("Preparing...").classes("text-sm text-grey-6 text-center")
+                    status_label = ui.label("Preparing...").classes(
+                        "text-sm text-grey-6 text-center"
+                    )
 
             try:
                 status_label.text = "Preparing combined transcript from all selected clips..."
@@ -5256,15 +6296,16 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
 
                 transcript_text, augmented_segments = _build_multi_transcript_and_segments()
                 if not augmented_segments:
-                    ui.notify("No usable transcript segments across the selected clips.", color="warning")
+                    ui.notify(
+                        "No usable transcript segments across the selected clips.", color="warning"
+                    )
                     return
 
                 # NOTE: AI Director runs on combined labeled TRANSCRIPTS ONLY.
                 # No audio is sent to the Director (by explicit request).
-                audio_for_listening = None
 
                 primary_src = sources[0]
-                primary_label = primary_src['label']
+                primary_label = primary_src["label"]
 
                 status_label.text = f"Sending combined labeled transcript from {primary_label} (and other clips) to AI Director..."
                 await asyncio.sleep(0.03)
@@ -5278,7 +6319,7 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
 
                 versions = await asyncio.to_thread(
                     generate_director_cuts,
-                    augmented_segments,                    # still carries source_* keys
+                    augmented_segments,  # still carries source_* keys
                     float(max_dur.value),
                     min_duration_seconds=float(min_dur.value),
                     purpose=purpose.value,
@@ -5286,10 +6327,10 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                     num_versions=int(num_versions.value),
                     clean_fillers=bool(clean_fillers.value),
                     narration_style=narration_style.value,  # new style enum: None | "omniscient" | "subjective" | "explainer"
-                    source_media_path=None,   # Explicitly no audio for Director (transcript-only)
+                    source_media_path=None,  # Explicitly no audio for Director (transcript-only)
                     combined_transcript=canonical_transcript,  # the one clean labeled document
                     source_count=len(sources),
-                    material_language=primary_language,   # Pass the real original language from metadata
+                    material_language=primary_language,  # Pass the real original language from metadata
                     narration_min_seconds=float(d_narr_min_sec.value or 0),
                     narration_max_seconds=float(d_narr_max_sec.value or 0),
                     narration_min_bridges=int(d_narr_min_b.value or 0),
@@ -5309,10 +6350,12 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                 # from that clip's authoritative sidecar, exactly like Journalist).
                 try:
                     from minicat.core.video import repair_director_version_with_transcripts
+
                     cat_root = None
                     vids = []
                     try:
                         from minicat.ui.app import get_state
+
                         st = get_state()
                         cat_root = getattr(st, "catalog_root", None) if st else None
                         vids = getattr(st, "videos", None) or []
@@ -5320,7 +6363,9 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                         pass
                     if cat_root:
                         for i, ver in enumerate(versions):
-                            versions[i] = repair_director_version_with_transcripts(ver, cat_root, vids)
+                            versions[i] = repair_director_version_with_transcripts(
+                                ver, cat_root, vids
+                            )
                 except Exception as _dir_re:
                     print(f"[AI Director] post-gen sidecar transcript repair skipped: {_dir_re}")
 
@@ -5340,7 +6385,8 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                     for v in versions:
                         if "narrative_elements" in v:
                             v["narrative_elements"] = [
-                                item for item in v.get("narrative_elements", [])
+                                item
+                                for item in v.get("narrative_elements", [])
                                 if item.get("type") != "narration"
                             ]
                         if "narration_text" in v:
@@ -5362,10 +6408,14 @@ def _show_multi_ai_journalist_cut_dialog(selected_videos: list[Any]) -> None:
                     return len(used)
 
                 min_desired = min(3, len(sources))  # at least 3 if possible
-                needs_retry = any(_count_used_sources(v) < 2 for v in versions)  # at least 2 different clips
+                needs_retry = any(
+                    _count_used_sources(v) < 2 for v in versions
+                )  # at least 2 different clips
 
                 if needs_retry and len(sources) >= 2:
-                    print(f"[AI Director] Low source diversity detected (mostly used one clip). Retrying with stronger instruction...")
+                    print(
+                        "[AI Director] Low source diversity detected (mostly used one clip). Retrying with stronger instruction..."
+                    )
                     status_label.text = "Director mostly used one clip — retrying with stronger diversity enforcement..."
 
                     corrective_system = (
@@ -5390,7 +6440,10 @@ Return only the JSON array.
                     try:
                         # Create client for the corrective retry
                         from google import genai
+                        from google.genai import types
+
                         from minicat.core.settings import get_gemini_api_key
+
                         api_key = get_gemini_api_key()
                         retry_client = genai.Client(api_key=api_key.strip()) if api_key else None
 
@@ -5409,7 +6462,9 @@ Return only the JSON array.
                                 if raw_retry.lower().startswith("json"):
                                     raw_retry = raw_retry[4:].strip()
                             retry_data = json.loads(raw_retry)
-                            retry_versions = validate_and_normalize_versions(retry_data, num_versions)
+                            retry_versions = validate_and_normalize_versions(
+                                retry_data, num_versions
+                            )
                             _reattach_source_info(retry_versions, augmented_segments)
                             versions = retry_versions
                             print("[AI Director] Retry successful with better diversity.")
@@ -5426,7 +6481,9 @@ Return only the JSON array.
                     ui.label(f"AI Director failed: {ex}").classes("text-negative")
                     ui.label("Check the console for more details.").classes("text-xs text-grey-5")
                 print(f"[AI Director] {ex}")
-                import traceback; traceback.print_exc()
+                import traceback
+
+                traceback.print_exc()
             finally:
                 generate_btn.enable()
 
@@ -5446,7 +6503,6 @@ def _reattach_source_info(versions: list[dict], original_augmented: list[dict]) 
     5. (New robust fallback) Direct source_label match (C1/C2... as required by Director prompt) to attach source_path etc.
        This guarantees that the plain "Export XML" (no VO) button and basic multi export always produce a file.
     """
-    import re
 
     # Primary lookup by time + text
     time_text_lookup = {}
@@ -5456,7 +6512,11 @@ def _reattach_source_info(versions: list[dict], original_augmented: list[dict]) 
     by_source = {}  # source_label -> list of orig segments
 
     for s in original_augmented:
-        t_key = (round(s.get("source_in", 0), 2), round(s.get("source_out", 0), 2), (s.get("text") or "")[:60])
+        t_key = (
+            round(s.get("source_in", 0), 2),
+            round(s.get("source_out", 0), 2),
+            (s.get("text") or "")[:60],
+        )
         time_text_lookup[t_key] = s
 
         norm_text = (s.get("text") or "").strip().lower()[:80]
@@ -5482,7 +6542,11 @@ def _reattach_source_info(versions: list[dict], original_augmented: list[dict]) 
                 reason = seg.get("reason") or ""
 
                 # 1. Try exact time + text
-                k = (round(seg.get("source_in", 0), 2), round(seg.get("source_out", 0), 2), (seg.get("text") or "")[:60])
+                k = (
+                    round(seg.get("source_in", 0), 2),
+                    round(seg.get("source_out", 0), 2),
+                    (seg.get("text") or "")[:60],
+                )
                 if k in time_text_lookup:
                     matched = time_text_lookup[k]
 
@@ -5494,7 +6558,7 @@ def _reattach_source_info(versions: list[dict], original_augmented: list[dict]) 
 
                 # 3. Try to parse explicit source from the AI's reason field
                 if not matched and reason:
-                    src_match = re.search(r'\b(C\d+)\b', reason, re.IGNORECASE)
+                    src_match = re.search(r"\b(C\d+)\b", reason, re.IGNORECASE)
                     if src_match:
                         guessed_src = src_match.group(1).upper()
                         candidates = by_source.get(guessed_src, [])
@@ -5517,7 +6581,7 @@ def _reattach_source_info(versions: list[dict], original_augmented: list[dict]) 
                     seg_start = seg.get("source_in", 0) or 0
                     guessed_src = None
                     if reason:
-                        m = re.search(r'\b(C\d+)\b', reason, re.IGNORECASE)
+                        m = re.search(r"\b(C\d+)\b", reason, re.IGNORECASE)
                         if m:
                             guessed_src = m.group(1).upper()
 
@@ -5537,7 +6601,12 @@ def _reattach_source_info(versions: list[dict], original_augmented: list[dict]) 
                         matched = best_match
 
                 if matched:
-                    for extra_key in ("source_label", "source_filename", "source_path", "source_clip_index"):
+                    for extra_key in (
+                        "source_label",
+                        "source_filename",
+                        "source_path",
+                        "source_clip_index",
+                    ):
                         if extra_key in matched:
                             seg[extra_key] = matched[extra_key]
                     # Repair the *times* (core of making material sync to the script text)
@@ -5559,8 +6628,16 @@ def _reattach_source_info(versions: list[dict], original_augmented: list[dict]) 
                 if src_label and "source_path" not in seg:
                     for orig in original_augmented:
                         orig_lbl = orig.get("source_label") or orig.get("source_filename")
-                        if orig_lbl and str(orig_lbl).strip().upper() == str(src_label).strip().upper():
-                            for extra_key in ("source_label", "source_filename", "source_path", "source_clip_index"):
+                        if (
+                            orig_lbl
+                            and str(orig_lbl).strip().upper() == str(src_label).strip().upper()
+                        ):
+                            for extra_key in (
+                                "source_label",
+                                "source_filename",
+                                "source_path",
+                                "source_clip_index",
+                            ):
                                 if extra_key in orig:
                                     seg[extra_key] = orig[extra_key]
                             # Also correct the times from original for perfect material sync
@@ -5585,6 +6662,7 @@ def _reveal_stories_folder(stories_dir: Path) -> None:
     try:
         import platform
         import subprocess
+
         p = Path(stories_dir).expanduser().resolve()
         p.mkdir(parents=True, exist_ok=True)
         sysname = platform.system()
@@ -5664,12 +6742,15 @@ def load_ai_director_story_and_show_export(story_path: Path | str) -> None:
         if not ver:
             ui.notify("The selected file is not a valid saved AI Director story.", color="negative")
             return
-        ui.notify(f"Loaded story “{ver.get('title', p.name)}” — ready for export.", color="positive")
+        ui.notify(
+            f"Loaded story “{ver.get('title', p.name)}” — ready for export.", color="positive"
+        )
         _repair_loaded_story_sources(ver)
         # Also repair times from sidecars (so loaded old stories get full verbatim spans too)
         try:
             from minicat.core.video import repair_director_version_with_transcripts
             from minicat.ui.app import get_state
+
             st = get_state()
             cat_root = getattr(st, "catalog_root", None) if st else None
             vids = getattr(st, "videos", None) or []
@@ -5686,11 +6767,19 @@ def load_ai_director_story_and_show_export(story_path: Path | str) -> None:
             ui.timer(0.1, lambda v=ver: _perform_narration_vo_export_for_loaded_story(v), once=True)
         else:
             try:
-                suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:40] }"
+                suggestion = (
+                    f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:40]}"
+                )
                 target_dir = create_export_subfolder(suggestion)
-                out = multi_xmeml_exporter.export_ai_director_multi_xmeml(ver, output_dir=target_dir)
+                out = multi_xmeml_exporter.export_ai_director_multi_xmeml(
+                    ver, output_dir=target_dir
+                )
                 if out:
-                    ui.notify(f"XML + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported → {out.name} (in {target_dir.name})", color="positive", duration=6)
+                    ui.notify(
+                        f"XML + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported → {out.name} (in {target_dir.name})",
+                        color="positive",
+                        duration=6,
+                    )
                 else:
                     ui.notify("Export returned no file", color="warning")
             except Exception as ex:
@@ -5715,7 +6804,7 @@ def _repair_loaded_story_sources(ver: dict) -> None:
             return
         # filename -> list[Video]
         by_name: dict[str, list] = {}
-        for v in (getattr(state, "videos", []) or []):
+        for v in getattr(state, "videos", []) or []:
             fn = getattr(v, "filename", None)
             if not fn and getattr(v, "path", None):
                 fn = Path(v.path).name
@@ -5730,7 +6819,7 @@ def _repair_loaded_story_sources(ver: dict) -> None:
         seg_lists: list[list[dict]] = []
         if ver.get("selected_segments"):
             seg_lists.append(ver.get("selected_segments", []))
-        for item in (ver.get("narrative_elements") or []):
+        for item in ver.get("narrative_elements") or []:
             if isinstance(item, dict) and item.get("type") == "clip":
                 seg_lists.append([item])
 
@@ -5741,7 +6830,11 @@ def _repair_loaded_story_sources(ver: dict) -> None:
                 fn = seg.get("source_filename") or seg.get("source_label")
                 if not fn:
                     continue
-                cands = by_name.get(fn) or by_name.get(Path(str(fn)).name) or by_name.get(Path(str(fn)).stem)
+                cands = (
+                    by_name.get(fn)
+                    or by_name.get(Path(str(fn)).name)
+                    or by_name.get(Path(str(fn)).stem)
+                )
                 if cands:
                     v = cands[0]
                     p = getattr(v, "path", None)
@@ -5763,19 +6856,22 @@ def _show_load_ai_director_story_dialog() -> None:
     """
     with ui.dialog() as load_dlg, ui.card().classes("w-[560px]"):
         ui.label("Load Saved AI Director Story").classes("text-h6 mb-2")
-        ui.label("Open a previously saved AI cut (with narrations/voiceover script) to export the full multi-source XMEML + optional voiceovers without re-running the Director.").classes("text-sm text-grey-5 mb-3")
+        ui.label(
+            "Open a previously saved AI cut (with narrations/voiceover script) to export the full multi-source XMEML + optional voiceovers without re-running the Director."
+        ).classes("text-sm text-grey-5 mb-3")
 
         # Prominent way to open a *specific* file the user has (e.g. AIStory_....json they just saved)
         def _choose_specific_story_file():
             try:
                 import webview
+
                 win = webview.active_window() or (webview.windows[0] if webview.windows else None)
                 if win:
                     res = win.create_file_dialog(
                         webview.FileDialog.OPEN,
                         directory=str(Path.home()),
                         allow_multiple=False,
-                        file_types=("JSON files (*.json)", "*.json")
+                        file_types=("JSON files (*.json)", "*.json"),
                     )
                     if res:
                         chosen = Path(res[0] if isinstance(res, (list, tuple)) else res)
@@ -5791,7 +6887,7 @@ def _show_load_ai_director_story_dialog() -> None:
             "Choose specific .json file (your AIStory_....json)...",
             icon="file_open",
             on_click=_choose_specific_story_file,
-            color="primary"
+            color="primary",
         ).classes("w-full mb-3").props("size=md")
 
         stories_dir = _get_ai_director_stories_dir()
@@ -5805,15 +6901,22 @@ def _show_load_ai_director_story_dialog() -> None:
             try:
                 ver = load_ai_director_story(path.read_bytes())
                 if not ver:
-                    ui.notify("The selected file is not a valid saved AI Director story.", color="negative")
+                    ui.notify(
+                        "The selected file is not a valid saved AI Director story.",
+                        color="negative",
+                    )
                     return
                 load_dlg.close()
-                ui.notify(f"Loaded story “{ver.get('title', 'Untitled')}” — ready for export.", color="positive")
+                ui.notify(
+                    f"Loaded story “{ver.get('title', 'Untitled')}” — ready for export.",
+                    color="positive",
+                )
                 _repair_loaded_story_sources(ver)
                 # Also repair times from sidecars (so loaded old stories get full verbatim spans too)
                 try:
                     from minicat.core.video import repair_director_version_with_transcripts
                     from minicat.ui.app import get_state
+
                     st = get_state()
                     cat_root = getattr(st, "catalog_root", None) if st else None
                     vids = getattr(st, "videos", None) or []
@@ -5822,19 +6925,30 @@ def _show_load_ai_director_story_dialog() -> None:
                 except Exception:
                     pass
                 has_narr = bool(ver.get("narration_text")) or any(
-                    item.get("type") == "narration" for item in (ver.get("narrative_elements") or [])
+                    item.get("type") == "narration"
+                    for item in (ver.get("narrative_elements") or [])
                 )
                 if has_narr:
                     # Directly render the AI Narration / Voiceover Script (as WAV bridges via its language + provider)
                     # and produce XML with them added. No extra choice dialog — "load to render narrations & XML" just works.
-                    ui.timer(0.1, lambda v=ver: _perform_narration_vo_export_for_loaded_story(v), once=True)
+                    ui.timer(
+                        0.1,
+                        lambda v=ver: _perform_narration_vo_export_for_loaded_story(v),
+                        once=True,
+                    )
                 else:
                     try:
-                        suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:40] }"
+                        suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:40]}"
                         target_dir = create_export_subfolder(suggestion)
-                        out = multi_xmeml_exporter.export_ai_director_multi_xmeml(ver, output_dir=target_dir)
+                        out = multi_xmeml_exporter.export_ai_director_multi_xmeml(
+                            ver, output_dir=target_dir
+                        )
                         if out:
-                            ui.notify(f"XML + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported → {out.name} (in {target_dir.name})", color="positive", duration=6)
+                            ui.notify(
+                                f"XML + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported → {out.name} (in {target_dir.name})",
+                                color="positive",
+                                duration=6,
+                            )
                         else:
                             ui.notify("Export returned no file", color="warning")
                     except Exception as ex:
@@ -5844,8 +6958,12 @@ def _show_load_ai_director_story_dialog() -> None:
                 print(f"[Load AI Story] {ex}")
 
         if story_files:
-            ui.label("Recent saved stories (from your export dir / ai_director_stories):").classes("text-sm font-medium mt-1 mb-1")
-            with ui.column().classes("w-full max-h-[220px] overflow-auto border border-zinc-800 rounded p-1 mb-3 gap-y-0.5"):
+            ui.label("Recent saved stories (from your export dir / ai_director_stories):").classes(
+                "text-sm font-medium mt-1 mb-1"
+            )
+            with ui.column().classes(
+                "w-full max-h-[220px] overflow-auto border border-zinc-800 rounded p-1 mb-3 gap-y-0.5"
+            ):
                 for p in story_files:
                     try:
                         raw = p.read_text(encoding="utf-8", errors="ignore")
@@ -5861,20 +6979,40 @@ def _show_load_ai_director_story_dialog() -> None:
                             except Exception:
                                 when = saved_at[:16]
                         else:
-                            when = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+                            when = datetime.fromtimestamp(p.stat().st_mtime).strftime(
+                                "%Y-%m-%d %H:%M"
+                            )
                         label = f"{title}  •  {n} clips  •  {when}"
                     except Exception:
                         label = p.name
 
-                    with ui.row().classes("w-full items-center justify-between hover:bg-zinc-800 rounded cursor-pointer px-2 py-1 text-sm").on("click", lambda pp=p: _load_story_file(pp)):
+                    with (
+                        ui.row()
+                        .classes(
+                            "w-full items-center justify-between hover:bg-zinc-800 rounded cursor-pointer px-2 py-1 text-sm"
+                        )
+                        .on("click", lambda pp=p: _load_story_file(pp))
+                    ):
                         ui.label(label).classes("truncate flex-1")
-                        ui.button(icon="play_arrow", on_click=lambda pp=p: _load_story_file(pp)).props("flat dense size=xs round").tooltip("Load this story")
+                        ui.button(
+                            icon="play_arrow", on_click=lambda pp=p: _load_story_file(pp)
+                        ).props("flat dense size=xs round").tooltip("Load this story")
             with ui.row().classes("w-full justify-between items-center mb-2"):
-                ui.button("Open stories folder", icon="folder", on_click=lambda: _reveal_stories_folder(stories_dir)).props("outline size=sm").classes("text-xs")
+                ui.button(
+                    "Open stories folder",
+                    icon="folder",
+                    on_click=lambda: _reveal_stories_folder(stories_dir),
+                ).props("outline size=sm").classes("text-xs")
                 ui.label(f"{len(story_files)} recent").classes("text-xs text-grey-5")
         else:
-            ui.label("No saved stories yet in the standard location.").classes("text-xs text-grey-5 mb-2")
-            ui.button("Open stories folder", icon="folder", on_click=lambda: _reveal_stories_folder(stories_dir)).props("outline size=sm").classes("mb-3")
+            ui.label("No saved stories yet in the standard location.").classes(
+                "text-xs text-grey-5 mb-2"
+            )
+            ui.button(
+                "Open stories folder",
+                icon="folder",
+                on_click=lambda: _reveal_stories_folder(stories_dir),
+            ).props("outline size=sm").classes("mb-3")
 
         ui.label("Or load a .json from anywhere:").classes("text-xs text-grey-5 mt-1 mb-1")
 
@@ -5882,15 +7020,22 @@ def _show_load_ai_director_story_dialog() -> None:
             try:
                 ver = load_ai_director_story(e.content.read())
                 if not ver:
-                    ui.notify("The selected file is not a valid saved AI Director story.", color="negative")
+                    ui.notify(
+                        "The selected file is not a valid saved AI Director story.",
+                        color="negative",
+                    )
                     return
                 load_dlg.close()
-                ui.notify(f"Loaded story “{ver.get('title', 'Untitled')}” — ready for export.", color="positive")
+                ui.notify(
+                    f"Loaded story “{ver.get('title', 'Untitled')}” — ready for export.",
+                    color="positive",
+                )
                 _repair_loaded_story_sources(ver)
                 # Also repair times from sidecars (so loaded old stories get full verbatim spans too)
                 try:
                     from minicat.core.video import repair_director_version_with_transcripts
                     from minicat.ui.app import get_state
+
                     st = get_state()
                     cat_root = getattr(st, "catalog_root", None) if st else None
                     vids = getattr(st, "videos", None) or []
@@ -5899,19 +7044,30 @@ def _show_load_ai_director_story_dialog() -> None:
                 except Exception:
                     pass
                 has_narr = bool(ver.get("narration_text")) or any(
-                    item.get("type") == "narration" for item in (ver.get("narrative_elements") or [])
+                    item.get("type") == "narration"
+                    for item in (ver.get("narrative_elements") or [])
                 )
                 if has_narr:
                     # Directly render the AI Narration / Voiceover Script (as WAV bridges via its language + provider)
                     # and produce XML with them added. No extra choice dialog — "load to render narrations & XML" just works.
-                    ui.timer(0.1, lambda v=ver: _perform_narration_vo_export_for_loaded_story(v), once=True)
+                    ui.timer(
+                        0.1,
+                        lambda v=ver: _perform_narration_vo_export_for_loaded_story(v),
+                        once=True,
+                    )
                 else:
                     try:
-                        suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:40] }"
+                        suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:40]}"
                         target_dir = create_export_subfolder(suggestion)
-                        out = multi_xmeml_exporter.export_ai_director_multi_xmeml(ver, output_dir=target_dir)
+                        out = multi_xmeml_exporter.export_ai_director_multi_xmeml(
+                            ver, output_dir=target_dir
+                        )
                         if out:
-                            ui.notify(f"XML + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported → {out.name} (in {target_dir.name})", color="positive", duration=6)
+                            ui.notify(
+                                f"XML + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported → {out.name} (in {target_dir.name})",
+                                color="positive",
+                                duration=6,
+                            )
                         else:
                             ui.notify("Export returned no file", color="warning")
                     except Exception as ex:
@@ -5938,13 +7094,12 @@ def _show_ai_director_xml_export_dialog(ver: dict):
     """Small dialog to choose voiceover options when exporting XML (hoisted for reuse from saved stories)."""
     with ui.dialog() as dlg, ui.card().classes("w-[420px]"):
         ui.label("Export AI Director XML").classes("text-h6 mb-2")
-        ui.label("Voiceover narration (if enabled) will be included as a separate audio track in the XML with correct timeline position.").classes("text-xs text-grey-5 mb-3")
+        ui.label(
+            "Voiceover narration (if enabled) will be included as a separate audio track in the XML with correct timeline position."
+        ).classes("text-xs text-grey-5 mb-3")
 
         # Voiceover options
-        generate_vo = ui.checkbox(
-            "Generate voiceover narration audio",
-            value=True
-        ).classes("mb-2")
+        generate_vo = ui.checkbox("Generate voiceover narration audio", value=True).classes("mb-2")
 
         # === Robust language selector (defensive against stale pycache / bad narration_language values) ===
         try:
@@ -5963,8 +7118,17 @@ def _show_ai_director_xml_export_dialog(ver: dict):
         valid_codes = set(lang_options.keys())
 
         # Prefer settings > version data > safe fallback
-        from minicat.core.settings import get_tts_default_language, get_tts_voice, clean_tts_voice, clean_tts_language
-        raw_default = clean_tts_language(ver.get("narration_language") or get_tts_default_language() or "en") or "en"
+        from minicat.core.settings import (
+            clean_tts_language,
+            clean_tts_voice,
+            get_tts_default_language,
+            get_tts_voice,
+        )
+
+        raw_default = (
+            clean_tts_language(ver.get("narration_language") or get_tts_default_language() or "en")
+            or "en"
+        )
         if raw_default in valid_codes:
             default_lang = raw_default
         elif "en" in valid_codes:
@@ -5981,11 +7145,11 @@ def _show_ai_director_xml_export_dialog(ver: dict):
 
         # Use two-step select creation (value=None first, then assign + update)
         # to avoid NiceGUI "Invalid value: fi" etc. at construction time.
-        lang_select = ui.select(
-            options=lang_options,
-            value=None,
-            label="Voiceover Language"
-        ).props("dense").classes("w-full mb-4")
+        lang_select = (
+            ui.select(options=lang_options, value=None, label="Voiceover Language")
+            .props("dense")
+            .classes("w-full mb-4")
+        )
         if default_lang in codes:
             lang_select.value = default_lang
         else:
@@ -5999,7 +7163,10 @@ def _show_ai_director_xml_export_dialog(ver: dict):
         def update_voice_options():
             if not voice_select or not supports_custom_voice:
                 return
-            lang = clean_tts_language((lang_select.value if lang_select else None) or default_lang) or default_lang
+            lang = (
+                clean_tts_language((lang_select.value if lang_select else None) or default_lang)
+                or default_lang
+            )
             if tts_provider == "local":
                 voices = get_piper_voices_for_language(lang) or []
             else:
@@ -6034,11 +7201,15 @@ def _show_ai_director_xml_export_dialog(ver: dict):
             preferred_voice = voice_list[0][0]
 
         # Two-step for voice too
-        voice_select = ui.select(
-            options=voice_list if voice_list else [("default", "default voice for language")],
-            value=None,
-            label=voice_label,
-        ).props("dense").classes("w-full mb-3")
+        voice_select = (
+            ui.select(
+                options=voice_list if voice_list else [("default", "default voice for language")],
+                value=None,
+                label=voice_label,
+            )
+            .props("dense")
+            .classes("w-full mb-3")
+        )
 
         if preferred_voice is not None:
             vnames = [v[0] for v in (voice_select.options or voice_list or [])]
@@ -6062,6 +7233,7 @@ def _show_ai_director_xml_export_dialog(ver: dict):
         def toggle_lang(e):
             lang_select.enabled = e.value
             voice_select.enabled = e.value and supports_custom_voice
+
         generate_vo.on_value_change(toggle_lang)
         lang_select.enabled = generate_vo.value
         voice_select.enabled = generate_vo.value and supports_custom_voice
@@ -6081,8 +7253,11 @@ def _show_ai_director_xml_export_dialog(ver: dict):
                 if not do_generate_vo:
                     # Fast path (no audio generation, just XML or titles-only via other buttons)
                     # Compute subfolder so even titles-only or no-VO lands grouped
-                    suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:40] }"
+                    suggestion = (
+                        f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:40]}"
+                    )
                     target_dir = create_export_subfolder(suggestion)
+
                     def _run_vo_export():
                         return narrative_vo_exporter.export_narrative_vo_xmeml(
                             ver,
@@ -6091,16 +7266,22 @@ def _show_ai_director_xml_export_dialog(ver: dict):
                             voiceover_voice=selected_voice,
                             output_dir=target_dir,
                         )
+
                     try:
                         out_path = await asyncio.to_thread(_run_vo_export)
                         if out_path:
-                            ui.notify(f"XML + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported → {out_path.name} (in {target_dir.name})", color="positive", duration=6)
+                            ui.notify(
+                                f"XML + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported → {out_path.name} (in {target_dir.name})",
+                                color="positive",
+                                duration=6,
+                            )
                         else:
                             ui.notify("XML export returned no file (see console)", color="warning")
                     except Exception as ex:
                         ui.notify(f"XML export failed: {ex}", color="negative")
                         print(f"[XML Export] {ex}")
                         import traceback
+
                         traceback.print_exc()
                     return
 
@@ -6110,7 +7291,9 @@ def _show_ai_director_xml_export_dialog(ver: dict):
                 # build the timeline XML (with picture clips shifted for correct narration gaps).
                 with ui.dialog() as prog_dlg, ui.card().classes("w-[520px]"):
                     ui.label("Generating Narration Voiceovers").classes("text-h6 mb-1")
-                    ui.label("The system will generate WAV (Piper) or MP3 (Google) for each narration bridge, probe exact duration + audio specs (sr/ch), then emit a timeline XML with VOs at their correct interleaved positions.").classes("text-xs text-grey-5 mb-2")
+                    ui.label(
+                        "The system will generate WAV (Piper) or MP3 (Google) for each narration bridge, probe exact duration + audio specs (sr/ch), then emit a timeline XML with VOs at their correct interleaved positions."
+                    ).classes("text-xs text-grey-5 mb-2")
                     pbar = ui.linear_progress(value=0.0, show_value=True).props("size=lg")
                     status_label = ui.label("Preparing TTS...").classes("text-sm mt-1")
                     detail_label = ui.label("").classes("text-xs text-grey-6 wrap")
@@ -6123,12 +7306,16 @@ def _show_ai_director_xml_export_dialog(ver: dict):
                 vo_files: list[dict] = []
                 try:
                     narrative_sequence = get_narrative_sequence(ver) or []
-                    narration_bridges = [item for item in narrative_sequence if item.get("type") == "narration"]
+                    narration_bridges = [
+                        item for item in narrative_sequence if item.get("type") == "narration"
+                    ]
                     n = len([b for b in narration_bridges if (b.get("text") or "").strip()])
                     # Always create a fresh subfolder inside the default export directory (e.g. ~/CAT+TAG/Exports) for this export
-                    suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:40] }"
+                    suggestion = (
+                        f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:40]}"
+                    )
                     export_dir = create_export_subfolder(suggestion)
-                    name = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:30] }"
+                    (f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:30]}")
                     lang_to_use = selected_lang
 
                     if n > 0:
@@ -6155,11 +7342,15 @@ def _show_ai_director_xml_export_dialog(ver: dict):
                             bridge_num += 1
                             status_label.text = f"Generating bridge {bridge_num} of {n}..."
                             pbar.value = max(0.05, (bridge_num - 0.6) / max(1, n))
-                            short = bridge_text if len(bridge_text) <= 90 else bridge_text[:87] + "..."
+                            short = (
+                                bridge_text if len(bridge_text) <= 90 else bridge_text[:87] + "..."
+                            )
                             detail_label.text = short
 
                             vo_name = f"Narration_Bridge{bridge_num:02d}.{vo_ext}"
-                            vo_p = export_dir / vo_name  # export_dir is already the new per-export subfolder
+                            vo_p = (
+                                export_dir / vo_name
+                            )  # export_dir is already the new per-export subfolder
 
                             try:
                                 await asyncio.to_thread(
@@ -6180,17 +7371,23 @@ def _show_ai_director_xml_export_dialog(ver: dict):
                                 except Exception:
                                     ainfo = {"channels": 1, "sample_rate": 44100}
 
-                                vo_files.append({
-                                    "path": vo_p,
-                                    "text": bridge_text,
-                                    "index": bridge_num,
-                                    "duration": vo_duration,
-                                    "sample_rate": ainfo.get("sample_rate", 44100),
-                                    "channels": ainfo.get("channels", 1),
-                                })
-                                print(f"[Narrative VO Exporter] Bridge {bridge_num}/{n} ready: {vo_duration:.2f}s sr={ainfo.get('sample_rate')} ch={ainfo.get('channels')}")
+                                vo_files.append(
+                                    {
+                                        "path": vo_p,
+                                        "text": bridge_text,
+                                        "index": bridge_num,
+                                        "duration": vo_duration,
+                                        "sample_rate": ainfo.get("sample_rate", 44100),
+                                        "channels": ainfo.get("channels", 1),
+                                    }
+                                )
+                                print(
+                                    f"[Narrative VO Exporter] Bridge {bridge_num}/{n} ready: {vo_duration:.2f}s sr={ainfo.get('sample_rate')} ch={ainfo.get('channels')}"
+                                )
                             except Exception as vo_ex:
-                                print(f"[Narrative VO Exporter] Bridge {bridge_num} generation failed: {vo_ex}")
+                                print(
+                                    f"[Narrative VO Exporter] Bridge {bridge_num} generation failed: {vo_ex}"
+                                )
                                 # continue without this bridge; XML will still be valid
 
                             pbar.value = bridge_num / max(1, n)
@@ -6200,9 +7397,13 @@ def _show_ai_director_xml_export_dialog(ver: dict):
                     # for the narration script.
                     full_script = (ver.get("narration_text") or "").strip()
                     if not full_script and narration_bridges:
-                        full_script = "\n\n".join(b.get("text", "").strip() for b in narration_bridges if b.get("text"))
+                        full_script = "\n\n".join(
+                            b.get("text", "").strip() for b in narration_bridges if b.get("text")
+                        )
                     if full_script:
-                        nar_p = export_dir / "Narration.wav"  # lands inside the per-export subfolder
+                        nar_p = (
+                            export_dir / "Narration.wav"
+                        )  # lands inside the per-export subfolder
                         try:
                             await asyncio.to_thread(
                                 generate_narration_audio_sync,
@@ -6211,22 +7412,28 @@ def _show_ai_director_xml_export_dialog(ver: dict):
                                 output_path=nar_p,
                                 voice=selected_voice,
                             )
-                            print(f"[Narrative VO Exporter] Exported full narration script as Narration.wav")
+                            print(
+                                "[Narrative VO Exporter] Exported full narration script as Narration.wav"
+                            )
                             # Also add to vo_files so Narration.wav gets imported/added to the XML (extra VO clip)
                             try:
                                 _, nar_dur = get_media_start_offset_and_duration(nar_p)
                                 nar_duration = float(nar_dur) if nar_dur else 0.0
                                 ainfo = get_audio_characteristics(nar_p)
-                                vo_files.append({
-                                    "path": nar_p,
-                                    "text": full_script,
-                                    "index": 99,
-                                    "duration": nar_duration,
-                                    "sample_rate": ainfo.get("sample_rate", 44100),
-                                    "channels": ainfo.get("channels", 1),
-                                })
+                                vo_files.append(
+                                    {
+                                        "path": nar_p,
+                                        "text": full_script,
+                                        "index": 99,
+                                        "duration": nar_duration,
+                                        "sample_rate": ainfo.get("sample_rate", 44100),
+                                        "channels": ainfo.get("channels", 1),
+                                    }
+                                )
                             except Exception as ex:
-                                print(f"[Narrative VO Exporter] Could not add Narration.wav to pregen for XML: {ex}")
+                                print(
+                                    f"[Narrative VO Exporter] Could not add Narration.wav to pregen for XML: {ex}"
+                                )
                         except Exception as ex:
                             print(f"[Narrative VO Exporter] Failed to export Narration.wav: {ex}")
                     else:
@@ -6255,7 +7462,9 @@ def _show_ai_director_xml_export_dialog(ver: dict):
                         msg = f"XML + voiceovers + AI DIRECTOR — MULTI-CLIP SCRIPT.txt exported → {out_path.name} (folder: {export_dir.name})"
                         ui.notify(msg, color="positive", duration=8)
                     else:
-                        ui.notify("Voiceover XML export returned no file (see console)", color="warning")
+                        ui.notify(
+                            "Voiceover XML export returned no file (see console)", color="warning"
+                        )
                 except Exception as ex:
                     try:
                         prog_dlg.close()
@@ -6264,6 +7473,7 @@ def _show_ai_director_xml_export_dialog(ver: dict):
                     ui.notify(f"XML + Voiceover export failed: {ex}", color="negative")
                     print(f"[XML + Voiceover Export] {ex}")
                     import traceback
+
                     traceback.print_exc()
 
             ui.button("Export XML", icon="description", color="primary", on_click=do_export)
@@ -6282,6 +7492,7 @@ def export_ai_director_multi_clip_script(ver: dict, target_dir: Path | None = No
     try:
         from minicat.core.video import repair_director_version_with_transcripts
         from minicat.ui.app import get_state
+
         st = get_state()
         cat_root = getattr(st, "catalog_root", None) if st else None
         vids = getattr(st, "videos", None) or []
@@ -6303,6 +7514,7 @@ def export_ai_director_multi_clip_script(ver: dict, target_dir: Path | None = No
 
     try:
         from datetime import datetime
+
         if target_dir is not None:
             export_dir = Path(target_dir)
             export_dir.mkdir(parents=True, exist_ok=True)
@@ -6311,8 +7523,8 @@ def export_ai_director_multi_clip_script(ver: dict, target_dir: Path | None = No
         else:
             export_dir = get_default_export_directory()
             base = "MultiClip"
-            ver_id = ver.get('version_id', 'X')
-            title_slug = (ver.get('title') or 'Story').replace(' ', '_')[:30]
+            ver_id = ver.get("version_id", "X")
+            title_slug = (ver.get("title") or "Story").replace(" ", "_")[:30]
             out_name = f"{base}_{ver_id}_{title_slug}.txt"
             out_path = export_dir / out_name
 
@@ -6321,12 +7533,14 @@ def export_ai_director_multi_clip_script(ver: dict, target_dir: Path | None = No
         lines.append(labels["ai_director_multi"])
         lines.append("=" * 72)
         lines.append(f"{labels['exported']} {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-        lines.append(f"{labels['version']}  {ver.get('version_id', '?')} — {ver.get('title', 'Untitled')}")
-        dur_str = format_duration_timecode(ver.get('total_duration', 0), 25)
+        lines.append(
+            f"{labels['version']}  {ver.get('version_id', '?')} — {ver.get('title', 'Untitled')}"
+        )
+        dur_str = format_duration_timecode(ver.get("total_duration", 0), 25)
         lines.append(f"{labels['duration']} {dur_str}")
         lines.append("")
 
-        summary = ver.get('narrative_summary', '').strip()
+        summary = ver.get("narrative_summary", "").strip()
         if summary:
             lines.append(labels["editorial_summary"])
             lines.append("-" * 72)
@@ -6341,16 +7555,18 @@ def export_ai_director_multi_clip_script(ver: dict, target_dir: Path | None = No
         except Exception:
             narrative_sequence = []
             for seg in ver.get("selected_segments", []):
-                narrative_sequence.append({
-                    "type": "clip",
-                    "source_label": seg.get("source_label"),
-                    "source_in": seg.get("source_in") or seg.get("start"),
-                    "source_out": seg.get("source_out") or seg.get("end"),
-                    "text": seg.get("text"),
-                    "reason": seg.get("reason"),
-                    "source_path": seg.get("source_path"),
-                    "source_filename": seg.get("source_filename"),
-                })
+                narrative_sequence.append(
+                    {
+                        "type": "clip",
+                        "source_label": seg.get("source_label"),
+                        "source_in": seg.get("source_in") or seg.get("start"),
+                        "source_out": seg.get("source_out") or seg.get("end"),
+                        "text": seg.get("text"),
+                        "reason": seg.get("reason"),
+                        "source_path": seg.get("source_path"),
+                        "source_filename": seg.get("source_filename"),
+                    }
+                )
             # Legacy fallback for combined narration_text when sequence helper unavailable
             narration_text = (ver.get("narration_text") or "").strip()
             if narration_text:
@@ -6404,7 +7620,7 @@ def export_ai_director_multi_clip_script(ver: dict, target_dir: Path | None = No
                 dur = max(0.0, (e - s))
                 lines.append(f"\n{clip_num}. [{fmt(s)} → {fmt(e)}] ({dur:.2f}s)  — from {src}")
                 lines.append(f"   {labels['text_label_dir']}   {item.get('text', '')}")
-                reason = (item.get('reason') or '').strip()
+                reason = (item.get("reason") or "").strip()
                 if reason:
                     lines.append(f"   {labels['why_chosen']} {reason}")
                 else:
@@ -6446,22 +7662,22 @@ def _perform_narration_vo_export_for_loaded_story(ver: dict):
     using the story's language + provider and includes them in the XML.
     """
     # Local imports for TTS helpers (keep top-level clean)
-    from minicat.core.settings import (
-        get_tts_default_language,
-        get_tts_voice,
-        clean_tts_voice,
-        clean_tts_language,
-    )
     from minicat.ai.voiceover import (
-        generate_narration_audio_sync,
         ensure_piper_package,
-        get_voice_for_language,
+        generate_narration_audio_sync,
         get_piper_voices_for_language,
     )
+    from minicat.core.settings import (
+        clean_tts_language,
+        clean_tts_voice,
+        get_tts_default_language,
+        get_tts_voice,
+    )
 
-    lang_to_use = clean_tts_language(
-        ver.get("narration_language") or get_tts_default_language() or "en"
-    ) or "en"
+    lang_to_use = (
+        clean_tts_language(ver.get("narration_language") or get_tts_default_language() or "en")
+        or "en"
+    )
 
     # Force "local" (Piper) for loaded stories' AI Narration / Voiceover Script rendering.
     # This guarantees WAV (stereo 44100Hz) output using Piper for the script (e.g. 'fi'),
@@ -6469,7 +7685,6 @@ def _perform_narration_vo_export_for_loaded_story(ver: dict):
     # "AI Narration / Voiceover Script (fi) - use piper tts" and "get these out as audio (wav)".
     # The global provider setting still controls the choice dialog for live Director exports.
     # We also import get_tts_provider but override here.
-    provider = "local"
     selected_voice = None
     try:
         vlist = get_piper_voices_for_language(lang_to_use) or []
@@ -6547,12 +7762,21 @@ def _perform_narration_vo_export_for_loaded_story(ver: dict):
                     pass
 
                 if progress.error:
-                    ui.notify(f"Failed to render narration VO for loaded story: {progress.error}", color="negative")
+                    ui.notify(
+                        f"Failed to render narration VO for loaded story: {progress.error}",
+                        color="negative",
+                    )
                     print(f"[Loaded Story VO] {progress.error}")
                 elif progress.result_path:
-                    ui.notify(progress.status or "Narration VO + XML export complete.", color="positive", duration=8)
+                    ui.notify(
+                        progress.status or "Narration VO + XML export complete.",
+                        color="positive",
+                        duration=8,
+                    )
                 else:
-                    ui.notify(progress.status or "Narration VO export finished (no file)", color="warning")
+                    ui.notify(
+                        progress.status or "Narration VO export finished (no file)", color="warning"
+                    )
         except Exception as poll_err:
             print(f"[Loaded Story VO] poll error (non-fatal): {poll_err}")
 
@@ -6566,13 +7790,15 @@ def _perform_narration_vo_export_for_loaded_story(ver: dict):
         export_dir = None
         try:
             narrative_sequence = get_narrative_sequence(ver) or []
-            narration_bridges = [item for item in narrative_sequence if item.get("type") == "narration"]
+            narration_bridges = [
+                item for item in narrative_sequence if item.get("type") == "narration"
+            ]
             n = len([b for b in narration_bridges if (b.get("text") or "").strip()])
 
-            suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:40] }"
+            suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:40]}"
             export_dir = create_export_subfolder(suggestion)
             # name var was unused in original; keep for parity if needed later
-            _ = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:30] }"
+            _ = f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:30]}"
 
             p.status = "Preparing TTS for narration script..."
             p.value = 0.01
@@ -6614,15 +7840,19 @@ def _perform_narration_vo_export_for_loaded_story(ver: dict):
                         except Exception:
                             ainfo = {"channels": 2, "sample_rate": 44100}
 
-                        vo_files.append({
-                            "path": vo_p,
-                            "text": bridge_text,
-                            "index": bridge_num,
-                            "duration": vo_duration,
-                            "sample_rate": ainfo.get("sample_rate", 44100),
-                            "channels": ainfo.get("channels", 1),
-                        })
-                        print(f"[Loaded Story VO] Bridge {bridge_num}/{n} ready from narration script")
+                        vo_files.append(
+                            {
+                                "path": vo_p,
+                                "text": bridge_text,
+                                "index": bridge_num,
+                                "duration": vo_duration,
+                                "sample_rate": ainfo.get("sample_rate", 44100),
+                                "channels": ainfo.get("channels", 1),
+                            }
+                        )
+                        print(
+                            f"[Loaded Story VO] Bridge {bridge_num}/{n} ready from narration script"
+                        )
                     except Exception as vo_ex:
                         print(f"[Loaded Story VO] Bridge {bridge_num} generation failed: {vo_ex}")
                         # continue; XML will still be produced (without this bridge's audio)
@@ -6635,7 +7865,9 @@ def _perform_narration_vo_export_for_loaded_story(ver: dict):
                 # files are still generated for correct timeline placement of individual parts.
                 full_script = (ver.get("narration_text") or "").strip()
                 if not full_script and narration_bridges:
-                    full_script = "\n\n".join(b.get("text", "").strip() for b in narration_bridges if b.get("text"))
+                    full_script = "\n\n".join(
+                        b.get("text", "").strip() for b in narration_bridges if b.get("text")
+                    )
                 if full_script:
                     nar_p = export_dir / "Narration.wav"  # inside the new per-export subfolder
                     try:
@@ -6646,22 +7878,26 @@ def _perform_narration_vo_export_for_loaded_story(ver: dict):
                             output_path=nar_p,
                             voice=selected_voice,
                         )
-                        print(f"[Loaded Story VO] Exported full narration script as Narration.wav")
+                        print("[Loaded Story VO] Exported full narration script as Narration.wav")
                         # Also add to vo_files so it gets imported/added to the XML (as extra VO clip at end of track)
                         try:
                             _, nar_dur = get_media_start_offset_and_duration(nar_p)
                             nar_duration = float(nar_dur) if nar_dur else 0.0
                             ainfo = get_audio_characteristics(nar_p)
-                            vo_files.append({
-                                "path": nar_p,
-                                "text": full_script,
-                                "index": 99,
-                                "duration": nar_duration,
-                                "sample_rate": ainfo.get("sample_rate", 44100),
-                                "channels": ainfo.get("channels", 1),
-                            })
+                            vo_files.append(
+                                {
+                                    "path": nar_p,
+                                    "text": full_script,
+                                    "index": 99,
+                                    "duration": nar_duration,
+                                    "sample_rate": ainfo.get("sample_rate", 44100),
+                                    "channels": ainfo.get("channels", 1),
+                                }
+                            )
                         except Exception as ex:
-                            print(f"[Loaded Story VO] Could not add Narration.wav to pregen for XML: {ex}")
+                            print(
+                                f"[Loaded Story VO] Could not add Narration.wav to pregen for XML: {ex}"
+                            )
                     except Exception as ex:
                         print(f"[Loaded Story VO] Failed to export Narration.wav for script: {ex}")
             if n == 0:
@@ -6669,7 +7905,9 @@ def _perform_narration_vo_export_for_loaded_story(ver: dict):
                 p.detail = ""
 
             # Build the XML using the (possibly partial) pre-generated VO files for the script
-            p.status = "Building XMEML with voiceovers from the narration script at correct positions..."
+            p.status = (
+                "Building XMEML with voiceovers from the narration script at correct positions..."
+            )
             p.value = 0.97
             await asyncio.sleep(0.03)
 
@@ -6698,6 +7936,7 @@ def _perform_narration_vo_export_for_loaded_story(ver: dict):
             p.is_complete = True
             print(f"[Loaded Story VO] {ex}")
             import traceback
+
             traceback.print_exc()
 
     asyncio.create_task(_worker(progress))
@@ -6733,13 +7972,21 @@ def _show_rich_client_dialog(state: AppState, client_id: int | None = None):
 
         # Projects belonging to this client
         ui.label("Projects").classes("text-base font-semibold mb-2")
-        projects_under_client = db.get_projects_for_client(state.catalog_root, client.id) if client.id else []
+        projects_under_client = (
+            db.get_projects_for_client(state.catalog_root, client.id) if client.id else []
+        )
 
         if projects_under_client:
             for p in projects_under_client:
                 with ui.row().classes("items-center gap-2 mb-1"):
                     ui.label(p).classes("text-sm")
-                    ui.button(icon="info", on_click=lambda pp=p: (_show_rich_project_dialog(state, pp), dialog.close())).props("size=sm flat dense round")
+                    ui.button(
+                        icon="info",
+                        on_click=lambda pp=p: (
+                            _show_rich_project_dialog(state, pp),
+                            dialog.close(),
+                        ),
+                    ).props("size=sm flat dense round")
         else:
             ui.label("No projects assigned yet.").classes("text-xs text-grey-5 italic")
 
@@ -6749,11 +7996,15 @@ def _show_rich_client_dialog(state: AppState, client_id: int | None = None):
         with ui.row().classes("gap-4"):
             with ui.column().classes("flex-1"):
                 ui.label("Attachments").classes("text-sm font-semibold")
-                ui.label("(Coming soon: attach contracts, briefs, invoices...)").classes("text-xs text-grey-5 italic")
+                ui.label("(Coming soon: attach contracts, briefs, invoices...)").classes(
+                    "text-xs text-grey-5 italic"
+                )
 
             with ui.column().classes("flex-1"):
                 ui.label("Calendar / Timeline").classes("text-sm font-semibold")
-                ui.label("(Coming soon: project schedule view for this client)").classes("text-xs text-grey-5 italic")
+                ui.label("(Coming soon: project schedule view for this client)").classes(
+                    "text-xs text-grey-5 italic"
+                )
 
         def save_client():
             new_client = Client(
@@ -6776,7 +8027,11 @@ def _show_rich_client_dialog(state: AppState, client_id: int | None = None):
             ui.notify(f"Client '{saved.name}' saved", color="positive")
 
         with ui.row().classes("justify-between gap-2 mt-4 w-full"):
-            ui.button("Delete", on_click=lambda: (ui_dialogs.delete_client_dialog(state, client), dialog.close()), color="negative").props("flat")
+            ui.button(
+                "Delete",
+                on_click=lambda: (ui_dialogs.delete_client_dialog(state, client), dialog.close()),
+                color="negative",
+            ).props("flat")
             with ui.row().classes("gap-2"):
                 ui.button("Cancel", on_click=dialog.close).props("flat")
                 ui.button("Save Client", on_click=save_client, color="primary")
@@ -6791,6 +8046,7 @@ def _play_video(path: str, prefer_proxy: bool = True):
     """
     import platform
     import subprocess
+
     try:
         orig = Path(path).expanduser().resolve()
         to_play = orig
@@ -6820,7 +8076,7 @@ def _play_video(path: str, prefer_proxy: bool = True):
                         ["qlmanage", "-p", str(to_play)],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
-                        check=False
+                        check=False,
                     )
                     if result.returncode == 0:
                         used_quicklook = True
@@ -6867,15 +8123,23 @@ def _create_media_toolbar(state: AppState) -> None:
             # Build label -> (field, desc) map for clean lookup
             sort_map = {label: (field, desc) for label, field, desc in sort_choices}
             current_sort_label = next(
-                (label for label, field, desc in sort_choices if field == state.sort_field and desc == state.sort_desc),
-                sort_choices[0][0]
+                (
+                    label
+                    for label, field, desc in sort_choices
+                    if field == state.sort_field and desc == state.sort_desc
+                ),
+                sort_choices[0][0],
             )
 
-            sort_select = ui.select(
-                options=[label for label, _, _ in sort_choices],
-                value=current_sort_label,
-                label="Sort"
-            ).props("dense").classes("w-52")
+            sort_select = (
+                ui.select(
+                    options=[label for label, _, _ in sort_choices],
+                    value=current_sort_label,
+                    label="Sort",
+                )
+                .props("dense")
+                .classes("w-52")
+            )
 
             def on_sort_change(e):
                 # NiceGUI passes ValueChangeEventArguments, not the raw value
@@ -6887,14 +8151,22 @@ def _create_media_toolbar(state: AppState) -> None:
             sort_select.on_value_change(on_sort_change)
 
             # Selection actions
-            ui.button("Select All Visible", icon="select_all", on_click=lambda: _select_all_visible(state)).props("size=sm outline")
+            ui.button(
+                "Select All Visible", icon="select_all", on_click=lambda: _select_all_visible(state)
+            ).props("size=sm outline")
 
             if sel_count > 0:
-                ui.button("Unselect All", icon="clear", on_click=state.clear_selection).props("size=sm outline")
+                ui.button("Unselect All", icon="clear", on_click=state.clear_selection).props(
+                    "size=sm outline"
+                )
 
             # Column customization for list view (reorder + hide columns)
             if state.view_mode == "list":
-                ui.button("Columns", icon="view_column", on_click=lambda: _show_list_column_customizer(state)).props("size=sm outline")
+                ui.button(
+                    "Columns",
+                    icon="view_column",
+                    on_click=lambda: _show_list_column_customizer(state),
+                ).props("size=sm outline")
 
 
 def render_media_card(v: Video, state: AppState):
@@ -6904,8 +8176,10 @@ def render_media_card(v: Video, state: AppState):
     if is_sel:
         card_classes += " ring-2 ring-blue-500 bg-blue-900/10"
 
-    with ui.card().classes(card_classes + " overflow-hidden").on(
-        "click", lambda vv=v: state.set_single_selection(vv)
+    with (
+        ui.card()
+        .classes(card_classes + " overflow-hidden")
+        .on("click", lambda vv=v: state.set_single_selection(vv))
     ):
         # === MULTI-SELECT CHECKBOX (top-left) ===
         # Allows proper multi-selection without forcing single-select on every click
@@ -6917,20 +8191,31 @@ def render_media_card(v: Video, state: AppState):
         is_audio = False
         try:
             from minicat.cli.main import _is_audio_file
+
             is_audio = _is_audio_file(Path(v.path))
         except Exception:
-            is_audio = v.filename.lower().endswith((".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".aif"))
+            is_audio = v.filename.lower().endswith(
+                (".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".aif")
+            )
 
         with ui.element("div").classes("relative w-full aspect-video bg-black overflow-hidden"):
             # The actual thumbnail or placeholder
-            thumb = str(v.thumbnail_path) if v.thumbnail_path and Path(v.thumbnail_path).exists() else ""
+            thumb = (
+                str(v.thumbnail_path)
+                if v.thumbnail_path and Path(v.thumbnail_path).exists()
+                else ""
+            )
             if thumb:
                 ui.image(thumb).classes("w-full h-full object-cover")
             elif is_audio:
-                with ui.element("div").classes("w-full h-full bg-[#1a2332] flex items-center justify-center"):
+                with ui.element("div").classes(
+                    "w-full h-full bg-[#1a2332] flex items-center justify-center"
+                ):
                     ui.icon("graphic_eq", size="2.8em").classes("text-blue-400")
             else:
-                with ui.element("div").classes("w-full h-full bg-zinc-800 flex items-center justify-center"):
+                with ui.element("div").classes(
+                    "w-full h-full bg-zinc-800 flex items-center justify-center"
+                ):
                     ui.icon("movie", size="2.8em").classes("text-zinc-500")
 
             # Duration overlay - bottom left
@@ -6948,9 +8233,13 @@ def render_media_card(v: Video, state: AppState):
                 ui.label(res_str)
 
             # Optional subtle play hint overlay (right side)
-            with ui.element("div").classes(
-                "absolute bottom-5 right-1 z-10 px-1 py-0.5 bg-black/70 text-white text-xs rounded-sm leading-none flex items-center cursor-pointer hover:bg-black/90 transition-colors"
-            ).on("click.stop", lambda vv=v: _play_current_from_card(vv)):
+            with (
+                ui.element("div")
+                .classes(
+                    "absolute bottom-5 right-1 z-10 px-1 py-0.5 bg-black/70 text-white text-xs rounded-sm leading-none flex items-center cursor-pointer hover:bg-black/90 transition-colors"
+                )
+                .on("click.stop", lambda vv=v: _play_current_from_card(vv))
+            ):
                 ui.icon("play_arrow", size="0.95rem").classes("text-white")
 
             # Timecode overlay - top center (new requested position)
@@ -6975,9 +8264,12 @@ def render_media_card(v: Video, state: AppState):
                     is_audio_only = False
                     try:
                         from minicat.cli.main import _is_audio_file
+
                         is_audio_only = _is_audio_file(Path(v.path))
                     except Exception:
-                        is_audio_only = v.filename.lower().endswith((".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".aif"))
+                        is_audio_only = v.filename.lower().endswith(
+                            (".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".aif")
+                        )
 
                     if has_ai_tags:
                         ai_tip = "AI tags suggested (click to ask again)"
@@ -6995,33 +8287,42 @@ def render_media_card(v: Video, state: AppState):
                             ai_tip = "Ask AI for tags (needs storyboard or transcription)"
 
                     ui.button(
-                        icon="auto_awesome",
-                        on_click=lambda vv=v: _launch_ai_tag_suggestions(vv)
-                    ).props("flat dense size=xs").classes(f"{ai_color} hover:text-primary").tooltip(ai_tip)
+                        icon="auto_awesome", on_click=lambda vv=v: _launch_ai_tag_suggestions(vv)
+                    ).props("flat dense size=xs").classes(f"{ai_color} hover:text-primary").tooltip(
+                        ai_tip
+                    )
 
                     # Transcribe
                     has_trans = bool(getattr(v, "transcription_segments", None))
                     trans_color = "text-green-500" if has_trans else "text-zinc-500"
-                    trans_tip = "Transcription ready (click to re-transcribe)" if has_trans else "Transcribe audio with AI"
+                    trans_tip = (
+                        "Transcription ready (click to re-transcribe)"
+                        if has_trans
+                        else "Transcribe audio with AI"
+                    )
 
-                    ui.button(
-                        icon="mic",
-                        on_click=lambda vv=v: _launch_transcription(vv)
-                    ).props("flat dense size=xs").classes(f"{trans_color} hover:text-primary").tooltip(trans_tip)
+                    ui.button(icon="mic", on_click=lambda vv=v: _launch_transcription(vv)).props(
+                        "flat dense size=xs"
+                    ).classes(f"{trans_color} hover:text-primary").tooltip(trans_tip)
 
                     # Storyboard
                     has_sb = bool(getattr(v, "storyboard_path", None))
                     sb_color = "text-blue-400" if has_sb else "text-zinc-500"
-                    sb_tip = "Storyboard ready (click to view)" if has_sb else "Generate / view storyboard"
+                    sb_tip = (
+                        "Storyboard ready (click to view)"
+                        if has_sb
+                        else "Generate / view storyboard"
+                    )
                     ui.button(
-                        icon="grid_view",
-                        on_click=lambda vv=v: _show_storyboard_dialog(vv)
-                    ).props("flat dense size=xs").classes(f"{sb_color} hover:text-primary").tooltip(sb_tip)
+                        icon="grid_view", on_click=lambda vv=v: _show_storyboard_dialog(vv)
+                    ).props("flat dense size=xs").classes(f"{sb_color} hover:text-primary").tooltip(
+                        sb_tip
+                    )
 
                     # AI Journalist Cut
                     ui.button(
                         icon="content_cut",
-                        on_click=lambda vv=v: ui_dialogs.show_ai_journalist_cut_dialog(vv)
+                        on_click=lambda vv=v: ui_dialogs.show_ai_journalist_cut_dialog(vv),
                     ).props("flat dense size=xs").classes("text-zinc-500 hover:text-primary")
 
             # Tag row - compact and removable
@@ -7031,7 +8332,9 @@ def render_media_card(v: Video, state: AppState):
                     for tag in tags:
                         with ui.badge(color="blue-8").classes("cursor-pointer text-[10px]"):
                             ui.label(tag)
-                            ui.icon("close", size="xs").classes("q-ml-xs").on("click", lambda t=tag: _remove_tag_from_video(v, t))
+                            ui.icon("close", size="xs").classes("q-ml-xs").on(
+                                "click", lambda t=tag: _remove_tag_from_video(v, t)
+                            )
 
             # Secondary Metadata Row (compact)
             with ui.row().classes("w-full items-center gap-x-1.5 text-[10px] text-zinc-500"):
@@ -7050,14 +8353,26 @@ def create_media_grid() -> None:
     try:
         from minicat.cli.main import _is_audio_file
     except Exception:
+
         def _is_audio_file(p: Path) -> bool:  # type: ignore
-            return p.suffix.lower() in {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".aiff", ".aif"}
+            return p.suffix.lower() in {
+                ".wav",
+                ".mp3",
+                ".m4a",
+                ".aac",
+                ".flac",
+                ".ogg",
+                ".aiff",
+                ".aif",
+            }
 
     # While an import (including AI tagging) is in progress, don't re-render the media grid.
     # This avoids trying to load storyboard/thumbnail images for videos whose files are still being written.
-    if getattr(state, '_importing', False):
+    if getattr(state, "_importing", False):
         with ui.element("div").classes("q-pa-md w-full text-center text-grey-6"):
-            ui.label("Import in progress — media library will update when the import dialog is closed.").classes("text-sm")
+            ui.label(
+                "Import in progress — media library will update when the import dialog is closed."
+            ).classes("text-sm")
         return
 
     with ui.element("div").classes("q-pa-md w-full"):
@@ -7067,17 +8382,22 @@ def create_media_grid() -> None:
         state.apply_sort()
 
         # Warn if we hit the safety limit (user's processed clips with thumbs/transcriptions may be "missing" from view)
-        if len(getattr(state, '_raw_videos', [])) >= 1999:
-            ui.label("⚠️ Showing limited results (max ~2000 clips). Use search/filters to bring your transcribed or previewed clips into view. Clear filters to see newest first.").classes("text-xs text-orange-400 mb-2")
+        if len(getattr(state, "_raw_videos", [])) >= 1999:
+            ui.label(
+                "⚠️ Showing limited results (max ~2000 clips). Use search/filters to bring your transcribed or previewed clips into view. Clear filters to see newest first."
+            ).classes("text-xs text-orange-400 mb-2")
 
         if not state.videos:
-            ui.label("No clips match the current filters. Try clearing filters or importing footage.").classes("text-grey-6 mt-8")
+            ui.label(
+                "No clips match the current filters. Try clearing filters or importing footage."
+            ).classes("text-grey-6 mt-8")
             return
 
         # High-density cinematic media grid
         with ui.grid(columns=3).classes("gap-5 w-full"):
             for v in state.videos:
                 render_media_card(v, state)
+
 
 def create_media_list() -> None:
     """List view of clips with columns including camera sidecar XML technical metadata."""
@@ -7086,9 +8406,11 @@ def create_media_list() -> None:
         return
 
     # While an import (including AI tagging) is in progress, don't re-render the media list.
-    if getattr(state, '_importing', False):
+    if getattr(state, "_importing", False):
         with ui.element("div").classes("q-pa-md w-full text-center text-grey-6"):
-            ui.label("Import in progress — media library will update when the import dialog is closed.").classes("text-sm")
+            ui.label(
+                "Import in progress — media library will update when the import dialog is closed."
+            ).classes("text-sm")
         return
 
     with ui.element("div").classes("q-pa-md w-full"):
@@ -7098,11 +8420,15 @@ def create_media_list() -> None:
         state.apply_sort()
 
         # Warn if we hit the safety limit (user's processed clips with thumbs/transcriptions may be "missing" from view)
-        if len(getattr(state, '_raw_videos', [])) >= 1999:
-            ui.label("⚠️ Showing limited results (max ~2000 clips). Use search/filters to bring your transcribed or previewed clips into view. Clear filters to see newest first.").classes("text-xs text-orange-400 mb-2")
+        if len(getattr(state, "_raw_videos", [])) >= 1999:
+            ui.label(
+                "⚠️ Showing limited results (max ~2000 clips). Use search/filters to bring your transcribed or previewed clips into view. Clear filters to see newest first."
+            ).classes("text-xs text-orange-400 mb-2")
 
         if not state.videos:
-            ui.label("No clips match the current filters. Try clearing filters or importing footage.").classes("text-grey-6 mt-8")
+            ui.label(
+                "No clips match the current filters. Try clearing filters or importing footage."
+            ).classes("text-grey-6 mt-8")
             return
 
         # Build clean table data (avoid storing complex objects to prevent serialization issues)
@@ -7115,31 +8441,33 @@ def create_media_list() -> None:
             tags_str = ", ".join(v.tags) if v.tags else ""
 
             is_sel = state.is_selected(v)
-            rows.append({
-                "id": v.id or 0,
-                "selected": "☑" if is_sel else "☐",
-                "filename": v.filename,
-                "date": date_str or "—",
-                "length": length_str,
-                "codec": (v.codec or "").upper() or "—",
-                "resolution": f"{v.width}×{v.height}" if v.width and v.height else "—",
-                "camera": v.camera or "—",
-                "operator": v.operator or "—",
-                "lens": v.lens or "—",
-                "location": v.location or "—",
-                "tags": tags_str or "—",
-                # New camera XML technical metadata columns
-                "iso": str(v.iso) if v.iso else "—",
-                "aperture": f"f/{v.f_number}" if v.f_number else "—",
-                "shutter": v.shutter_speed or "—",
-                "focal": f"{int(v.focal_length)}mm" if v.focal_length else "—",
-                "wb": v.white_balance or "—",
-                "gamma": v.gamma or "—",
-                "color_primaries": v.color_primaries or "—",
-                "coding_equations": v.coding_equations or "—",
-                "tc_start": v.tc_start or "—",
-                "tc_end": v.tc_end or "—",
-            })
+            rows.append(
+                {
+                    "id": v.id or 0,
+                    "selected": "☑" if is_sel else "☐",
+                    "filename": v.filename,
+                    "date": date_str or "—",
+                    "length": length_str,
+                    "codec": (v.codec or "").upper() or "—",
+                    "resolution": f"{v.width}×{v.height}" if v.width and v.height else "—",
+                    "camera": v.camera or "—",
+                    "operator": v.operator or "—",
+                    "lens": v.lens or "—",
+                    "location": v.location or "—",
+                    "tags": tags_str or "—",
+                    # New camera XML technical metadata columns
+                    "iso": str(v.iso) if v.iso else "—",
+                    "aperture": f"f/{v.f_number}" if v.f_number else "—",
+                    "shutter": v.shutter_speed or "—",
+                    "focal": f"{int(v.focal_length)}mm" if v.focal_length else "—",
+                    "wb": v.white_balance or "—",
+                    "gamma": v.gamma or "—",
+                    "color_primaries": v.color_primaries or "—",
+                    "coding_equations": v.coding_equations or "—",
+                    "tc_start": v.tc_start or "—",
+                    "tc_end": v.tc_end or "—",
+                }
+            )
 
         # Build columns respecting user's custom order + visibility (from column customizer)
         base_columns = {c["name"]: c for c in _get_all_list_columns()}
@@ -7171,7 +8499,7 @@ def create_media_list() -> None:
             columns=columns,
             rows=rows,
             row_key="id",
-            pagination=50,   # prevent huge tables from causing issues
+            pagination=50,  # prevent huge tables from causing issues
         ).classes("w-full list-view-table")
 
 
@@ -7187,23 +8515,32 @@ def _render_welcome_screen() -> None:
                 '<span class="text-4xl font-bold text-primary">+</span>'
                 '<span class="text-4xl font-bold text-white">TAG</span>'
             )
-        ui.label("Your personal video catalog — 100% local and private").classes("text-lg text-grey-5")
+        ui.label("Your personal video catalog — 100% local and private").classes(
+            "text-lg text-grey-5"
+        )
 
         with ui.card().classes("w-96 p-6"):
             ui.label("Where do you want to store your catalog?").classes("text-lg mb-4")
 
             # === Pre-create stable fallback dialogs (this fixes the slot error) ===
             with ui.dialog() as create_dialog, ui.card().classes("w-96"):
-                folder_create = ui.input("New catalog folder path", value=str(Path.home() / "CAT+TAG"))
+                folder_create = ui.input(
+                    "New catalog folder path", value=str(Path.home() / "CAT+TAG")
+                )
+
                 def do_create():
                     p = Path(folder_create.value).expanduser()
                     p.mkdir(parents=True, exist_ok=True)
                     create_dialog.close()
                     _switch_to_catalog(p)
-                ui.button("Create / Use Folder", on_click=do_create, color="primary").classes("w-full mt-2")
+
+                ui.button("Create / Use Folder", on_click=do_create, color="primary").classes(
+                    "w-full mt-2"
+                )
 
             with ui.dialog() as open_dialog, ui.card().classes("w-96"):
                 folder_open = ui.input("Existing catalog folder path")
+
                 def do_open():
                     p = Path(folder_open.value).expanduser()
                     if (p / "catalog.db").exists():
@@ -7211,6 +8548,7 @@ def _render_welcome_screen() -> None:
                         _switch_to_catalog(p)
                     else:
                         ui.notify("No valid CAT+TAG catalog found in that folder", color="negative")
+
                 ui.button("Open Catalog", on_click=do_open, color="primary").classes("w-full mt-2")
 
             # === Buttons ===
@@ -7218,6 +8556,7 @@ def _render_welcome_screen() -> None:
                 # Prefer native macOS dialog
                 try:
                     import webview
+
                     if webview.windows:
                         result = webview.windows[0].create_file_dialog(
                             webview.FileDialog.FOLDER,
@@ -7237,6 +8576,7 @@ def _render_welcome_screen() -> None:
             def choose_existing():
                 try:
                     import webview
+
                     if webview.windows:
                         result = webview.windows[0].create_file_dialog(
                             webview.FileDialog.FOLDER,
@@ -7248,15 +8588,24 @@ def _render_welcome_screen() -> None:
                             if (chosen / "catalog.db").exists():
                                 _switch_to_catalog(chosen)
                             else:
-                                ui.notify("No valid CAT+TAG catalog in that folder", color="warning")
+                                ui.notify(
+                                    "No valid CAT+TAG catalog in that folder", color="warning"
+                                )
                             return
                 except Exception:
                     pass
                 open_dialog.open()
 
             with ui.column().classes("w-full gap-3"):
-                ui.button("Create New Catalog Folder...", icon="create_new_folder", on_click=choose_and_create, color="primary").classes("w-full py-3 text-lg")
-                ui.button("Open Existing Catalog...", icon="folder_open", on_click=choose_existing).classes("w-full py-3 text-lg")
+                ui.button(
+                    "Create New Catalog Folder...",
+                    icon="create_new_folder",
+                    on_click=choose_and_create,
+                    color="primary",
+                ).classes("w-full py-3 text-lg")
+                ui.button(
+                    "Open Existing Catalog...", icon="folder_open", on_click=choose_existing
+                ).classes("w-full py-3 text-lg")
 
         ui.label("Your footage never leaves this Mac").classes("text-xs text-grey-6 mt-4")
 
@@ -7318,9 +8667,7 @@ def trigger_import() -> None:
                 client_options[c.id] = c.name
 
             selected_client_id = ui.select(
-                options=client_options,
-                label="Client",
-                value=None
+                options=client_options, label="Client", value=None
             ).classes("w-full mb-2")
 
             def create_client_from_import():
@@ -7358,10 +8705,14 @@ def trigger_import() -> None:
                         ui.button("Create client", on_click=do_create, color="primary")
                 client_dialog.open()
 
-            ui.button("Create New Client", icon="add", on_click=create_client_from_import).props("size=sm flat dense").classes("mb-2")
+            ui.button("Create New Client", icon="add", on_click=create_client_from_import).props(
+                "size=sm flat dense"
+            ).classes("mb-2")
 
             # Project mode - restored to original radio style the user had before
-            project_mode = ui.radio(["New Project", "Existing Project"], value="New Project").props("inline")
+            project_mode = ui.radio(["New Project", "Existing Project"], value="New Project").props(
+                "inline"
+            )
 
             project_name = ui.input("Project Name").classes("w-full mb-2")
 
@@ -7396,26 +8747,42 @@ def trigger_import() -> None:
             def pick_folder():
                 try:
                     import webview
-                    win = webview.active_window() or (webview.windows[0] if webview.windows else None)
+
+                    win = webview.active_window() or (
+                        webview.windows[0] if webview.windows else None
+                    )
                     if win:
-                        res = win.create_file_dialog(webview.FileDialog.FOLDER, allow_multiple=False)
+                        res = win.create_file_dialog(
+                            webview.FileDialog.FOLDER, allow_multiple=False
+                        )
                         if res:
-                            folder_label.text = res[0] if isinstance(res, (list, tuple)) else str(res)
+                            folder_label.text = (
+                                res[0] if isinstance(res, (list, tuple)) else str(res)
+                            )
                             folder_label.classes(remove="text-grey-6", add="text-positive")
                             return
                     # Fallback to manual input
-                    ui.notify("Native folder picker not available — enter path manually below", color="warning")
+                    ui.notify(
+                        "Native folder picker not available — enter path manually below",
+                        color="warning",
+                    )
                 except Exception as ex:
                     ui.notify(f"Picker error: {ex} — enter path manually", color="warning")
 
-            ui.button("Choose Source Folder...", on_click=pick_folder, color="primary").classes("mb-2")
+            ui.button("Choose Source Folder...", on_click=pick_folder, color="primary").classes(
+                "mb-2"
+            )
 
             # Manual path fallback (useful when native picker fails or isn't available)
-            manual_folder = ui.input("Or type/paste folder path here", placeholder="/path/to/footage/folder").classes("w-full")
+            manual_folder = ui.input(
+                "Or type/paste folder path here", placeholder="/path/to/footage/folder"
+            ).classes("w-full")
+
             def use_manual():
                 if manual_folder.value.strip():
                     folder_label.text = manual_folder.value.strip()
                     folder_label.classes(remove="text-grey-6", add="text-positive")
+
             ui.button("Use typed path", on_click=use_manual).props("flat size=sm").classes("mb-4")
 
             # Timecode
@@ -7430,19 +8797,18 @@ def trigger_import() -> None:
                     timecode_start.update()
                 except Exception:
                     pass
+
             burn_timecode.on_value_change(toggle_tc)
 
             # AI Auto-tagging option
             ai_auto_tag = ui.checkbox(
-                "Use AI to automatically suggest tags for imported clips",
-                value=False
+                "Use AI to automatically suggest tags for imported clips", value=False
             ).classes("mt-4")
 
             # Transcription option (default OFF as requested)
-            auto_transcribe = ui.checkbox(
-                "Transcribe imported clips with AI",
-                value=False
-            ).classes("mt-1")
+            auto_transcribe = ui.checkbox("Transcribe imported clips with AI", value=False).classes(
+                "mt-1"
+            )
 
             async def start_import():
                 try:
@@ -7454,13 +8820,18 @@ def trigger_import() -> None:
 
                         # Prevent duplicate project names (the main cause of the UNIQUE constraint error)
                         if db.get_project(state.catalog_root, proj):
-                            ui.notify(f"A project named '{proj}' already exists. Please select it from the Existing Projects list or choose a different name.", color="negative")
+                            ui.notify(
+                                f"A project named '{proj}' already exists. Please select it from the Existing Projects list or choose a different name.",
+                                color="negative",
+                            )
                             return
 
                         # Enforce client for new projects
                         selected_cid = selected_client_id.value
                         if not selected_cid:
-                            ui.notify("Please select a Client for the new project", color="negative")
+                            ui.notify(
+                                "Please select a Client for the new project", color="negative"
+                            )
                             return
 
                         # Create project + assign client
@@ -7479,7 +8850,10 @@ def trigger_import() -> None:
                         selected_cid = selected_client_id.value
                         if selected_cid:
                             try:
-                                current = [c.id for c in db.get_clients_for_project(state.catalog_root, proj)]
+                                current = [
+                                    c.id
+                                    for c in db.get_clients_for_project(state.catalog_root, proj)
+                                ]
                                 if selected_cid not in current:
                                     current.append(selected_cid)
                                     db.set_project_clients(state.catalog_root, proj, current)
@@ -7496,29 +8870,49 @@ def trigger_import() -> None:
                     # Create progress dialog
                     progress_dialog = ui.dialog()
                     with progress_dialog, ui.card().classes("w-[560px]"):
-                        import_title = ui.label("Importing Media + Metadata").classes("text-h5 mb-2")
+                        import_title = ui.label("Importing Media + Metadata").classes(
+                            "text-h5 mb-2"
+                        )
 
                         with ui.column().classes("w-full gap-1"):
                             # Percent label on top of the bar (integer, no decimal)
-                            percent_label = ui.label("0%").classes("text-sm tabular-nums self-end mb-1")
+                            percent_label = ui.label("0%").classes(
+                                "text-sm tabular-nums self-end mb-1"
+                            )
 
                             # Progress bar (no built-in value to avoid 0.222222222 float display)
-                            progress_bar = ui.linear_progress(value=0, show_value=False).classes("w-full")
+                            progress_bar = ui.linear_progress(value=0, show_value=False).classes(
+                                "w-full"
+                            )
 
                             status_label = ui.label("Preparing import...").classes("text-sm mt-1")
                             file_label = ui.label("").classes("text-xs text-grey-6")
 
                         summary_label = ui.label("").classes("text-sm mt-4")
 
-                        close_btn = ui.button("Close", on_click=progress_dialog.close).props("flat").classes("mt-4 w-full")
+                        close_btn = (
+                            ui.button("Close", on_click=progress_dialog.close)
+                            .props("flat")
+                            .classes("mt-4 w-full")
+                        )
                         close_btn.visible = False
 
-                        cancel_btn = ui.button("Cancel Import", on_click=lambda: _request_cancel(), color="negative").props("flat").classes("mt-2 w-full")
+                        cancel_btn = (
+                            ui.button(
+                                "Cancel Import",
+                                on_click=lambda: _request_cancel(),
+                                color="negative",
+                            )
+                            .props("flat")
+                            .classes("mt-2 w-full")
+                        )
 
                         def _request_cancel():
                             state._import_cancel_requested = True
                             if status_label:
-                                status_label.text = "Cancel requested — finishing current file/operation..."
+                                status_label.text = (
+                                    "Cancel requested — finishing current file/operation..."
+                                )
                             ui.update(status_label)
                             try:
                                 cancel_btn.disable()
@@ -7527,9 +8921,9 @@ def trigger_import() -> None:
 
                         def _cleanup_after_import():
                             # Re-enable normal rendering of the media library and do a final refresh
-                            if hasattr(state, '_importing'):
+                            if hasattr(state, "_importing"):
                                 state._importing = False
-                            if hasattr(state, '_import_cancel_requested'):
+                            if hasattr(state, "_import_cancel_requested"):
                                 state._import_cancel_requested = False
                             try:
                                 state.reload()
@@ -7537,7 +8931,7 @@ def trigger_import() -> None:
                             except Exception:
                                 pass
 
-                        progress_dialog.on('hide', _cleanup_after_import)
+                        progress_dialog.on("hide", _cleanup_after_import)
 
                     progress_dialog.open()
                     await asyncio.sleep(0.08)  # let the dialog paint before heavy work begins
@@ -7582,6 +8976,7 @@ def trigger_import() -> None:
         ui.notify(f"Could not open Import Wizard: {ex}", color="negative", duration=8)
         print(f"[Import] top-level error: {ex}")  # keep for serious errors only
         import traceback
+
         traceback.print_exc()
 
 
@@ -7601,12 +8996,12 @@ async def do_wizard_import(
     percent_label=None,
     summary_label=None,
     close_btn=None,
-    import_title=None,   # so we can update the dialog title when AI phase starts
+    import_title=None,  # so we can update the dialog title when AI phase starts
     cancel_btn=None,
 ):
     """Main import logic with optional proxy generation and live progress UI."""
     try:
-        from minicat.cli.main import _is_audio_file, _is_supported_file, _is_video_file
+        from minicat.cli.main import _is_audio_file, _is_supported_file
         from minicat.core.video import find_ffmpeg, get_auto_import_tags
 
         # Friendly pre-flight check for ffmpeg (the #1 support issue for new users)
@@ -7651,7 +9046,9 @@ async def do_wizard_import(
         skipped = 0
         proxy_errors = 0
         errors = []
-        newly_added_ids: list[int] = []  # collect IDs; fetch fresh Video objs (with id+storyboard) after previews
+        newly_added_ids: list[
+            int
+        ] = []  # collect IDs; fetch fresh Video objs (with id+storyboard) after previews
 
         proxy_base = state.catalog_root / "proxies" / project_name
         proxy_base.mkdir(parents=True, exist_ok=True)
@@ -7665,7 +9062,9 @@ async def do_wizard_import(
             file_label.text = ""
         if percent_label:
             percent_label.text = "0%"
-        ui.update(*[w for w in (progress_bar, status_label, file_label, percent_label, cancel_btn) if w])
+        ui.update(
+            *[w for w in (progress_bar, status_label, file_label, percent_label, cancel_btn) if w]
+        )
         await asyncio.sleep(0.06)
 
         for index, f in enumerate(supported_files):
@@ -7682,11 +9081,17 @@ async def do_wizard_import(
                 file_label.text = f.name
             if percent_label:
                 percent_label.text = pct_text
-            ui.update(*[w for w in (progress_bar, status_label, file_label, percent_label, cancel_btn) if w])
-            await asyncio.sleep(0.025)   # give the client time to render the update
+            ui.update(
+                *[
+                    w
+                    for w in (progress_bar, status_label, file_label, percent_label, cancel_btn)
+                    if w
+                ]
+            )
+            await asyncio.sleep(0.025)  # give the client time to render the update
 
             # Check for user cancel request (from the Cancel button in progress dialog)
-            if getattr(state, '_import_cancel_requested', False):
+            if getattr(state, "_import_cancel_requested", False):
                 if status_label:
                     status_label.text = "Import canceled by user."
                 ui.update(status_label)
@@ -7700,7 +9105,9 @@ async def do_wizard_import(
             try:
                 # --- Metadata (ffprobe + sidecar XML + optional ExifTool) ---
                 if status_label:
-                    status_label.text = f"Processing {current} / {total} — Extracting metadata (XML + camera info)"
+                    status_label.text = (
+                        f"Processing {current} / {total} — Extracting metadata (XML + camera info)"
+                    )
                 ui.update(status_label)
                 await asyncio.sleep(0.015)
 
@@ -7761,7 +9168,9 @@ async def do_wizard_import(
                     camera=meta.get("camera"),
                     operator=None,
                     lens=xml_meta.get("lens") if xml_meta else None,
-                    shoot_date=meta.get("creation_date") if isinstance(meta.get("creation_date"), date) else None,
+                    shoot_date=meta.get("creation_date")
+                    if isinstance(meta.get("creation_date"), date)
+                    else None,
                     camera_xml_path=xml_meta.get("source_xml") if xml_meta else None,
                     iso=xml_meta.get("iso") if xml_meta else None,
                     f_number=xml_meta.get("f_number") if xml_meta else None,
@@ -7774,7 +9183,9 @@ async def do_wizard_import(
                     tc_start=meta.get("tc_start"),
                     tc_end=meta.get("tc_end"),
                 )
-                v.fingerprint = await asyncio.to_thread(video.fast_fingerprint, f, duration=v.duration)
+                v.fingerprint = await asyncio.to_thread(
+                    video.fast_fingerprint, f, duration=v.duration
+                )
                 video_id = db.add_video(state.catalog_root, v)
                 added += 1
                 newly_added_ids.append(video_id)
@@ -7812,7 +9223,9 @@ async def do_wizard_import(
                 else:
                     # Audio: no video thumbnails/storyboards. Grid will render waveform icon.
                     if status_label:
-                        status_label.text = f"Processing {current} / {total} — Audio imported (waveform icon)"
+                        status_label.text = (
+                            f"Processing {current} / {total} — Audio imported (waveform icon)"
+                        )
                     ui.update(status_label)
 
                 # --- Proxy (only if enabled; currently disabled in wizard) ---
@@ -7830,7 +9243,7 @@ async def do_wizard_import(
                             video.create_proxy,
                             source_path=f,
                             output_path=proxy_out,
-                            preset="H.264 \"Performance\" Proxy (720p)",
+                            preset='H.264 "Performance" Proxy (720p)',
                             burn_text=True,
                             text="CAT+TAG-Proxy",
                             burn_timecode=burn_timecode,
@@ -7851,7 +9264,13 @@ async def do_wizard_import(
                 status_label.text = f"Processed {current} / {total}"
             if percent_label:
                 percent_label.text = pct_text
-            ui.update(*[w for w in (progress_bar, status_label, file_label, percent_label, cancel_btn) if w])
+            ui.update(
+                *[
+                    w
+                    for w in (progress_bar, status_label, file_label, percent_label, cancel_btn)
+                    if w
+                ]
+            )
             await asyncio.sleep(0.02)
 
         # Final UI update
@@ -7863,13 +9282,17 @@ async def do_wizard_import(
             file_label.text = ""
         if percent_label:
             percent_label.text = "100%"
-        ui.update(*[w for w in (progress_bar, status_label, file_label, percent_label, cancel_btn) if w])
+        ui.update(
+            *[w for w in (progress_bar, status_label, file_label, percent_label, cancel_btn) if w]
+        )
 
         # Clean up transient progress widgets so the dialog ends in a nice "summary only" state
         for w in (progress_bar, percent_label, status_label, file_label, cancel_btn):
             if w:
                 w.visible = False
-        ui.update(*[w for w in (progress_bar, percent_label, status_label, file_label, cancel_btn) if w])
+        ui.update(
+            *[w for w in (progress_bar, percent_label, status_label, file_label, cancel_btn) if w]
+        )
 
         # Always give complete accounting so user knows exactly what happened to every file
         added + skipped + len(errors)
@@ -7881,7 +9304,7 @@ async def do_wizard_import(
             if errors:
                 msg += "\n\nFirst failures:\n" + "\n".join(errors[:5])
                 if len(errors) > 5:
-                    msg += f"\n... + {len(errors)-5} more (see console for full list)"
+                    msg += f"\n... + {len(errors) - 5} more (see console for full list)"
             summary_label.text = msg
             # Make multi-line summary readable
             summary_label.classes(add="whitespace-pre-line")
@@ -7901,7 +9324,7 @@ async def do_wizard_import(
                 ui.update(cancel_btn)
 
         # Check cancel before starting AI phases
-        if getattr(state, '_import_cancel_requested', False):
+        if getattr(state, "_import_cancel_requested", False):
             if status_label:
                 status_label.text = "Import canceled by user (AI phases skipped)."
             if close_btn:
@@ -7955,10 +9378,17 @@ async def do_wizard_import(
 
                         if summary_label:
                             current = summary_label.text or ""
-                            summary_label.text = current + f"\n\n[AI Phase] Auto-tagging {len(ready)} new clips with Gemini..."
+                            summary_label.text = (
+                                current
+                                + f"\n\n[AI Phase] Auto-tagging {len(ready)} new clips with Gemini..."
+                            )
                             ui.update(summary_label)
 
-                        ui.notify("AI auto-tagging started (dialog stays open until tagging finishes)", color="info", duration=5)
+                        ui.notify(
+                            "AI auto-tagging started (dialog stays open until tagging finishes)",
+                            color="info",
+                            duration=5,
+                        )
 
                         # === Safe polling timer (created in the main NiceGUI context) ===
                         # This timer runs in the import dialog's context and is allowed to create/update UI.
@@ -8018,13 +9448,20 @@ async def do_wizard_import(
                                         ui.notify(
                                             f"AI tagging finished — {tagging_progress.completed} clips tagged "
                                             f"({tagging_progress.total_tags_added} tags total)",
-                                            color="positive", duration=8
+                                            color="positive",
+                                            duration=8,
                                         )
                                     else:
-                                        ui.notify("AI auto-tagging finished (no new tags added).", color="warning", duration=6)
+                                        ui.notify(
+                                            "AI auto-tagging finished (no new tags added).",
+                                            color="warning",
+                                            duration=6,
+                                        )
 
                                 except Exception as poll_final_err:
-                                    print(f"[Import] AI poll error: {poll_final_err}")  # keep for errors
+                                    print(
+                                        f"[Import] AI poll error: {poll_final_err}"
+                                    )  # keep for errors
                                     if close_btn:
                                         close_btn.visible = True
                                         ui.update(close_btn)
@@ -8038,7 +9475,9 @@ async def do_wizard_import(
                                 except Exception:
                                     pass
 
-                        poll_timer = ui.timer(0.25, _poll_ai_tagging_progress)  # created in main context → safe
+                        poll_timer = ui.timer(
+                            0.25, _poll_ai_tagging_progress
+                        )  # created in main context → safe
                     else:
                         skip_msg = "(AI auto-tagging skipped — storyboards not ready)"
                         if summary_label:
@@ -8052,7 +9491,9 @@ async def do_wizard_import(
                             cancel_btn.visible = False
                             ui.update(cancel_btn)
                 except Exception as fetch_err:
-                    print(f"[AI Auto-Tag] Could not prepare videos for background tagging: {fetch_err}")
+                    print(
+                        f"[AI Auto-Tag] Could not prepare videos for background tagging: {fetch_err}"
+                    )
                     if close_btn:
                         close_btn.visible = True
                         ui.update(close_btn)
@@ -8069,7 +9510,11 @@ async def do_wizard_import(
                     current = summary_label.text or ""
                     summary_label.text = current + "\n\n(Note: " + skip_msg + ")"
                     ui.update(summary_label)
-                ui.notify("AI auto-tagging skipped: set your Gemini key in Settings first", color="warning", duration=6)
+                ui.notify(
+                    "AI auto-tagging skipped: set your Gemini key in Settings first",
+                    color="warning",
+                    duration=6,
+                )
                 if close_btn:
                     close_btn.visible = True
                     ui.update(close_btn)
@@ -8096,14 +9541,23 @@ async def do_wizard_import(
 
                 if queued_count > 0:
                     if status_label:
-                        status_label.text = f"Queued AI transcription for {queued_count} new clips..."
+                        status_label.text = (
+                            f"Queued AI transcription for {queued_count} new clips..."
+                        )
                         ui.update(status_label)
                     if summary_label:
                         current = summary_label.text or ""
-                        summary_label.text = current + f"\n\n[Transcription] Queued {queued_count} clips for AI transcription (check inspector for progress)."
+                        summary_label.text = (
+                            current
+                            + f"\n\n[Transcription] Queued {queued_count} clips for AI transcription (check inspector for progress)."
+                        )
                         summary_label.classes(add="whitespace-pre-line")
                         ui.update(summary_label)
-                    ui.notify(f"AI transcription queued for {queued_count} imported clips", color="info", duration=5)
+                    ui.notify(
+                        f"AI transcription queued for {queued_count} imported clips",
+                        color="info",
+                        duration=5,
+                    )
             except Exception as trans_ex:
                 print(f"[Import] Transcription queuing failed: {trans_ex}")
 
@@ -8120,6 +9574,7 @@ async def do_wizard_import(
         ui.notify(f"Import failed: {e}", color="negative")
         print(f"[Import] top level error: {e}")
         import traceback
+
         traceback.print_exc()
         if summary_label:
             summary_label.text = f"Import failed hard: {e}\n\nCheck console for traceback."
@@ -8133,7 +9588,7 @@ async def do_wizard_import(
             ui.update(cancel_btn)
 
         # Make sure we don't leave the main grid frozen on error
-        if hasattr(state, '_importing'):
+        if hasattr(state, "_importing"):
             state._importing = False
 
 
@@ -8147,6 +9602,7 @@ AITaggingProgress = task_workers.AITaggingProgress
 NarrationVOProgress = task_workers.NarrationVOProgress
 TRANSCRIPTION_JOBS = task_workers.TRANSCRIPTION_JOBS
 
+
 # Thin adapters so existing calls in app.py continue to work
 def queue_for_transcription(clip: Video, do_translate: bool = False):
     """Compatibility wrapper around the new task_workers module."""
@@ -8157,7 +9613,9 @@ def queue_for_transcription(clip: Video, do_translate: bool = False):
     )
     if success:
         kind = "transcription + translation" if do_translate else "transcription"
-        ui.notify(f"Queued for {kind}. Check bottom bar for progress.", color="positive", duration=4)
+        ui.notify(
+            f"Queued for {kind}. Check bottom bar for progress.", color="positive", duration=4
+        )
     else:
         ui.notify(f"{clip.filename} is already in the queue", color="info")
 
@@ -8187,7 +9645,9 @@ def _launch_ai_tag_suggestions(video: Video) -> None:
     has_transcript = bool(getattr(video, "transcription_segments", None))
 
     if not has_storyboard and not has_transcript:
-        ui.notify("AI tags require a storyboard (video) or transcription (audio/video)", color="warning")
+        ui.notify(
+            "AI tags require a storyboard (video) or transcription (audio/video)", color="warning"
+        )
         return
 
     api_key = get_gemini_api_key()
@@ -8244,7 +9704,9 @@ async def _ask_ai_suggestions_work(video: Video, api_key: str) -> None:
     except Exception as e:
         error_msg = str(e)
         if "404" in error_msg and "no longer available" in error_msg.lower():
-            error_msg = "Selected Gemini model is outdated. Please choose a current model in Settings."
+            error_msg = (
+                "Selected Gemini model is outdated. Please choose a current model in Settings."
+            )
         ui.notify(f"AI failed: {error_msg}", color="negative", multi_line=True)
         return
 
@@ -8260,7 +9722,8 @@ async def _ask_ai_suggestions_work(video: Video, api_key: str) -> None:
 # AI Auto-tagging for Import Wizard (background worker)
 # ---------------------------------------------------------------------------
 
-async def _auto_ai_tag_clips(state, videos: list, api_key: str, progress: "AITaggingProgress"):
+
+async def _auto_ai_tag_clips(state, videos: list, api_key: str, progress: AITaggingProgress):
     """Background worker for auto-tagging newly imported clips during the Import wizard.
     Must NEVER create or directly touch NiceGUI UI elements (use the progress object instead).
     """
@@ -8301,7 +9764,9 @@ async def _auto_ai_tag_clips(state, videos: list, api_key: str, progress: "AITag
                 progress.completed += 1
 
             except Exception as per_clip_err:
-                print(f"[AI Auto-Tag] Failed on {getattr(video, 'filename', 'unknown')}: {per_clip_err}")
+                print(
+                    f"[AI Auto-Tag] Failed on {getattr(video, 'filename', 'unknown')}: {per_clip_err}"
+                )
                 progress.errors += 1
                 progress.completed += 1
 
@@ -8313,7 +9778,9 @@ def _show_rich_ai_tag_review_dialog(video: Video, suggestions: list[str]):
     """Shared rich review dialog used by Grid cards, storyboard viewer, etc."""
     with ui.dialog() as sug_dialog, ui.card().classes("w-[520px]"):
         ui.label("AI Suggested Tags").classes("text-h6 mb-2")
-        ui.label("Review, edit, and select the tags you want to add").classes("text-xs text-grey-6 mb-3")
+        ui.label("Review, edit, and select the tags you want to add").classes(
+            "text-xs text-grey-6 mb-3"
+        )
 
         tag_items = [{"text": tag, "selected": True} for tag in suggestions]
 
@@ -8329,21 +9796,24 @@ def _show_rich_ai_tag_review_dialog(video: Video, suggestions: list[str]):
                     text = item.get("text") or ""
                     with ui.row().classes("items-center gap-2 w-full py-0.5"):
                         cb = ui.checkbox(
-                            text or "(empty tag)",
-                            value=bool(item.get("selected"))
+                            text or "(empty tag)", value=bool(item.get("selected"))
                         ).props("dense")
 
                         def make_cb_handler(i=idx):
                             def handler(e):
                                 tag_items[i]["selected"] = bool(getattr(e, "value", False))
                                 update_add_button()
+
                             return handler
+
                         cb.on_value_change(make_cb_handler())
 
                         def edit_item(i=idx):
                             async def do_edit():
                                 try:
-                                    new_val = await ui.input_dialog("Edit tag text", value=tag_items[i].get("text", ""))
+                                    new_val = await ui.input_dialog(
+                                        "Edit tag text", value=tag_items[i].get("text", "")
+                                    )
                                     if new_val is not None:
                                         cleaned = (new_val or "").strip().lower()
                                         if cleaned:
@@ -8352,19 +9822,28 @@ def _show_rich_ai_tag_review_dialog(video: Video, suggestions: list[str]):
                                             update_add_button()
                                 except Exception as ex:
                                     ui.notify(f"Could not edit: {ex}", color="negative")
+
                             asyncio.create_task(do_edit())
 
-                        ui.button(icon="edit", on_click=edit_item).props("flat dense size=sm color=grey-7")
+                        ui.button(icon="edit", on_click=edit_item).props(
+                            "flat dense size=sm color=grey-7"
+                        )
 
                         def delete_item(i=idx):
                             if 0 <= i < len(tag_items):
                                 del tag_items[i]
                                 refresh_items()
                                 update_add_button()
-                        ui.button(icon="delete", on_click=delete_item).props("flat dense size=sm color=grey-7")
+
+                        ui.button(icon="delete", on_click=delete_item).props(
+                            "flat dense size=sm color=grey-7"
+                        )
 
                 with ui.row().classes("items-center gap-2 w-full mt-2 pt-2 border-t border-grey-8"):
-                    custom_input = ui.input(placeholder="Add your own tag...").props("dense").classes("flex-1")
+                    custom_input = (
+                        ui.input(placeholder="Add your own tag...").props("dense").classes("flex-1")
+                    )
+
                     def add_custom():
                         val = (custom_input.value or "").strip().lower()
                         if val:
@@ -8372,6 +9851,7 @@ def _show_rich_ai_tag_review_dialog(video: Video, suggestions: list[str]):
                             custom_input.value = ""
                             refresh_items()
                             update_add_button()
+
                     ui.button("Add", on_click=add_custom, color="primary").props("dense size=sm")
 
         refresh_items()
@@ -8391,13 +9871,15 @@ def _show_rich_ai_tag_review_dialog(video: Video, suggestions: list[str]):
             if not video.id:
                 sug_dialog.close()
                 return
-            selected = [item["text"] for item in tag_items if item.get("selected") and item.get("text")]
+            selected = [
+                item["text"] for item in tag_items if item.get("selected") and item.get("text")
+            ]
             if not selected:
                 sug_dialog.close()
                 return
             current_state = get_state()
             if current_state:
-                current = set(getattr(video, 'tags', None) or [])
+                current = set(getattr(video, "tags", None) or [])
                 new_tags = current | set(selected)
                 db.set_video_tags(current_state.catalog_root, video.id, list(new_tags))
 
@@ -8440,7 +9922,7 @@ def _remove_tag_from_video(video: Video, tag: str) -> None:
     if not state or not video.id:
         return
 
-    current_tags = list(getattr(video, 'tags', []) or [])
+    current_tags = list(getattr(video, "tags", []) or [])
     if tag not in current_tags:
         return
 
@@ -8463,6 +9945,7 @@ def _remove_tag_from_video(video: Video, tag: str) -> None:
 # Main entry point
 # ---------------------------------------------------------------------------
 
+
 def setup_ui(catalog_root: Path | str | None = None) -> None:
     """
     Main entry point.
@@ -8472,11 +9955,12 @@ def setup_ui(catalog_root: Path | str | None = None) -> None:
     """
 
     # Serve custom assets (fonts, icons, etc.)
-    app.add_static_files('/assets', str(Path(__file__).parent.parent.parent / 'assets'))
+    app.add_static_files("/assets", str(Path(__file__).parent.parent.parent / "assets"))
 
     # Apply design system inspired by the Gemini reference (deep dark theme, refined typography, subtle accents)
     # Must use shared=True because we are using @ui.page
-    ui.add_head_html('''
+    ui.add_head_html(
+        """
     <style>
         /* ========================================
            PT Root UI Font Family
@@ -8700,7 +10184,9 @@ def setup_ui(catalog_root: Path | str | None = None) -> None:
             margin-bottom: 1px !important;
         }
     </style>
-    ''', shared=True)
+    """,
+        shared=True,
+    )
 
     @ui.page("/")
     def main_page():
@@ -8731,8 +10217,10 @@ def setup_ui(catalog_root: Path | str | None = None) -> None:
 
                 # Automatic cleanup of orphaned files: audio, transcripts, subtitles, and preview boards/thumbs (runs in background)
                 try:
-                    from minicat.core.video import cleanup_orphaned_catalog_files
                     import asyncio as _asyncio
+
+                    from minicat.core.video import cleanup_orphaned_catalog_files
+
                     clip_ids = {v.id for v in STATE.videos if v.id}
                     _asyncio.create_task(
                         _asyncio.to_thread(cleanup_orphaned_catalog_files, root, clip_ids)
@@ -8744,9 +10232,12 @@ def setup_ui(catalog_root: Path | str | None = None) -> None:
                 # This ensures that right after opening a catalog you won't see old .wav files in the audio/ folder.
                 try:
                     from minicat.core.video import purge_legacy_wav_caches
+
                     purged = purge_legacy_wav_caches(root, clip_ids)
                     if purged:
-                        print(f"[Audio Cache] Eager legacy WAV purge on load removed {purged} file(s)")
+                        print(
+                            f"[Audio Cache] Eager legacy WAV purge on load removed {purged} file(s)"
+                        )
                 except Exception as _legacy_ex:
                     print(f"[Audio Cache] Eager legacy WAV purge on load failed: {_legacy_ex}")
 
@@ -8754,12 +10245,14 @@ def setup_ui(catalog_root: Path | str | None = None) -> None:
                 # auto-load it and go straight to the narration render + XML export dialog.
                 initial_story = os.environ.pop("CAT_TAG_INITIAL_STORY", None)
                 if initial_story:
+
                     def _trigger_direct_story_load():
                         try:
                             load_ai_director_story_and_show_export(initial_story)
                         except Exception as _story_ex:
                             ui.notify(f"Auto-load story failed: {_story_ex}", color="negative")
                             print(_story_ex)
+
                     # Give the main layout (header, drawers, content) time to render
                     ui.timer(1.8, _trigger_direct_story_load, once=True)
             else:
@@ -8782,7 +10275,9 @@ def setup_ui(catalog_root: Path | str | None = None) -> None:
                         ui.label(f"📦 {len(STATE.videos)} clips visible")
 
                         # Live-updating transcription queue status (refreshes every 0.5s)
-                        transcription_status_label = ui.label("").classes("text-orange-400 font-medium")
+                        transcription_status_label = ui.label("").classes(
+                            "text-orange-400 font-medium"
+                        )
 
                         def _update_transcription_status():
                             all_jobs = list(TRANSCRIPTION_JOBS)
@@ -8793,7 +10288,12 @@ def setup_ui(catalog_root: Path | str | None = None) -> None:
 
                             if running_jobs:
                                 job = running_jobs[0]
-                                total = len(queued_jobs) + len(running_jobs) + len(done_jobs) + len(error_jobs)
+                                total = (
+                                    len(queued_jobs)
+                                    + len(running_jobs)
+                                    + len(done_jobs)
+                                    + len(error_jobs)
+                                )
                                 current = len(done_jobs) + 1
                                 text = f"🎙️ {job.message} ({current}/{total}) — {job.filename}"
                             elif queued_jobs:
@@ -8822,6 +10322,7 @@ def setup_ui(catalog_root: Path | str | None = None) -> None:
         except Exception as e:
             # Prevent 500 - show error and fallback to welcome
             import traceback
+
             traceback.print_exc()
             ui.notify(f"Error loading UI: {e}", color="negative", duration=10)
             print(f"[Startup] Critical error in main_page: {e}")
@@ -8840,9 +10341,14 @@ def setup_ui(catalog_root: Path | str | None = None) -> None:
                 def choose_catalog_again():
                     try:
                         import webview
-                        win = webview.active_window() or (webview.windows[0] if webview.windows else None)
+
+                        win = webview.active_window() or (
+                            webview.windows[0] if webview.windows else None
+                        )
                         if win:
-                            res = win.create_file_dialog(webview.FileDialog.FOLDER, allow_multiple=False)
+                            res = win.create_file_dialog(
+                                webview.FileDialog.FOLDER, allow_multiple=False
+                            )
                             if res:
                                 chosen = Path(res[0])
                                 chosen.mkdir(parents=True, exist_ok=True)
@@ -8852,7 +10358,10 @@ def setup_ui(catalog_root: Path | str | None = None) -> None:
                         else:
                             # Fallback text input if no webview
                             with ui.dialog() as d, ui.card():
-                                path_input = ui.input("Catalog folder path", value=str(Path.home() / "CAT+TAG"))
+                                path_input = ui.input(
+                                    "Catalog folder path", value=str(Path.home() / "CAT+TAG")
+                                )
+
                                 def do_choose():
                                     p = Path(path_input.value).expanduser()
                                     p.mkdir(parents=True, exist_ok=True)
@@ -8860,12 +10369,15 @@ def setup_ui(catalog_root: Path | str | None = None) -> None:
                                     settings.set_last_catalog(p)
                                     d.close()
                                     ui.navigate.reload()
+
                                 ui.button("Use this folder", on_click=do_choose, color="primary")
                             d.open()
                     except Exception as ex2:
                         ui.notify(f"Failed to choose folder: {ex2}", color="negative")
 
-                ui.button("Choose Catalog Folder Again", on_click=choose_catalog_again, color="primary").classes("mt-4")
+                ui.button(
+                    "Choose Catalog Folder Again", on_click=choose_catalog_again, color="primary"
+                ).classes("mt-4")
 
 
 def run_web(catalog_root: Path | str, **kwargs) -> None:
@@ -8896,6 +10408,7 @@ def create_app(catalog_root: Path | str) -> None:
 if __name__ == "__main__":
     # For direct testing: python -m minicat.ui.app /path/to/catalog
     import sys
+
     if len(sys.argv) > 1:
         create_app(sys.argv[1])
     else:

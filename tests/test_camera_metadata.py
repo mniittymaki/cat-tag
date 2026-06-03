@@ -2,6 +2,7 @@
 Unit tests for multi-brand camera metadata extraction.
 Uses the sample files in assets/sample_camera_xmls/
 """
+
 import tempfile
 from pathlib import Path
 
@@ -73,7 +74,9 @@ def test_arri_metadata_parsing():
         meta = video.extract_camera_xml_metadata(v)
 
         # Arri parser should have pulled camera model or lens
-        assert "ARRI" in str(meta.get("camera", "")) or "Signature Prime" in str(meta.get("lens", ""))
+        assert "ARRI" in str(meta.get("camera", "")) or "Signature Prime" in str(
+            meta.get("lens", "")
+        )
 
 
 def test_canon_xf_parsing():
@@ -98,7 +101,11 @@ def test_dji_xmp_parsing():
         meta = video.extract_camera_xml_metadata(v)
 
         # DJI XMP should at least parse without error and extract focal length or notes
-        assert meta.get("focal_length") == 24 or "alt" in str(meta.get("notes", "")).lower() or len(meta) > 1
+        assert (
+            meta.get("focal_length") == 24
+            or "alt" in str(meta.get("notes", "")).lower()
+            or len(meta) > 1
+        )
 
 
 def test_no_sidecar_returns_empty_or_exiftool_data():

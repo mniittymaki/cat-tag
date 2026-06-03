@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 from xml.dom import minidom
 
+from minicat.core.models import Video
+
 
 def seconds_to_frames(seconds: float, fps: float = 25.0) -> int:
     """
@@ -48,13 +50,10 @@ def frames_to_timecode(frames: int, fps: float = 25.0, start_timecode: str = "01
     This is mostly for the <timecode> elements.
     """
     timebase = int(round(fps))
-    ntsc = "FALSE"
     if abs(fps - 29.97) < 0.1:
         timebase = 30
-        ntsc = "TRUE"
     elif abs(fps - 59.94) < 0.1:
         timebase = 60
-        ntsc = "TRUE"
 
     # Parse start timecode if provided (simplified - assumes HH:MM:SS:FF)
     try:
@@ -128,13 +127,29 @@ def create_sequence(
 
     if separate_sequences:
         _build_per_version_sequences(
-            children, cuts, video_path, video_filename, video_duration,
-            sequence_name, effective_fps, timebase, ntsc, start_timecode
+            children,
+            cuts,
+            video_path,
+            video_filename,
+            video_duration,
+            sequence_name,
+            effective_fps,
+            timebase,
+            ntsc,
+            start_timecode,
         )
     else:
         _build_single_combined_sequence(
-            children, cuts, video_path, video_filename, video_duration,
-            sequence_name, effective_fps, timebase, ntsc, start_timecode
+            children,
+            cuts,
+            video_path,
+            video_filename,
+            video_duration,
+            sequence_name,
+            effective_fps,
+            timebase,
+            ntsc,
+            start_timecode,
         )
 
     rough = ET.tostring(root, encoding="unicode")
@@ -142,9 +157,18 @@ def create_sequence(
     return reparsed.toprettyxml(indent="    ")
 
 
-def _build_per_version_sequences(children, cuts, video_path, video_filename,
-                                  video_duration, sequence_name, effective_fps,
-                                  timebase, ntsc, start_timecode):
+def _build_per_version_sequences(
+    children,
+    cuts,
+    video_path,
+    video_filename,
+    video_duration,
+    sequence_name,
+    effective_fps,
+    timebase,
+    ntsc,
+    start_timecode,
+):
     for version in cuts:
         version_id = version.get("version_id", "A")
         title = version.get("title", f"Cut {version_id}")
@@ -159,8 +183,7 @@ def _build_per_version_sequences(children, cuts, video_path, video_filename,
             return float(out_t) - float(in_t)
 
         total_frames = sum(
-            seconds_to_frames(_seg_duration(s), effective_fps)
-            for s in selected_segments
+            seconds_to_frames(_seg_duration(s), effective_fps) for s in selected_segments
         )
 
         sequence = ET.SubElement(children, "sequence", id=f"seq-{version_id}")
@@ -176,13 +199,26 @@ def _build_per_version_sequences(children, cuts, video_path, video_filename,
         track = ET.SubElement(video, "track")
 
         master_id = f"file-master-{version_id}"
-        _add_master_file_reference(children, master_id, video_filename, video_path,
-                                   video_duration, effective_fps, timebase, ntsc, start_timecode)
+        _add_master_file_reference(
+            children,
+            master_id,
+            video_filename,
+            video_path,
+            video_duration,
+            effective_fps,
+            timebase,
+            ntsc,
+            start_timecode,
+        )
 
         current_start = 0
         for i, seg in enumerate(selected_segments, 1):
-            start_f = seconds_to_frames(float(seg.get("source_in") or seg.get("start", 0)), effective_fps)
-            end_f = seconds_to_frames(float(seg.get("source_out") or seg.get("end", 0)), effective_fps)
+            start_f = seconds_to_frames(
+                float(seg.get("source_in") or seg.get("start", 0)), effective_fps
+            )
+            end_f = seconds_to_frames(
+                float(seg.get("source_out") or seg.get("end", 0)), effective_fps
+            )
             dur = end_f - start_f
             if dur <= 0:
                 continue
@@ -210,9 +246,18 @@ def _build_per_version_sequences(children, cuts, video_path, video_filename,
         sequence.find("duration").text = str(current_start)
 
 
-def _build_single_combined_sequence(children, cuts, video_path, video_filename,
-                                     video_duration, sequence_name, effective_fps,
-                                     timebase, ntsc, start_timecode):
+def _build_single_combined_sequence(
+    children,
+    cuts,
+    video_path,
+    video_filename,
+    video_duration,
+    sequence_name,
+    effective_fps,
+    timebase,
+    ntsc,
+    start_timecode,
+):
     all_segs = []
     for ver in cuts:
         for s in ver.get("selected_segments", []):
@@ -224,8 +269,7 @@ def _build_single_combined_sequence(children, cuts, video_path, video_filename,
         return
 
     total_frames = sum(
-        seconds_to_frames(float(s["end"]) - float(s["start"]), effective_fps)
-        for s in all_segs
+        seconds_to_frames(float(s["end"]) - float(s["start"]), effective_fps) for s in all_segs
     )
 
     seq_name = sequence_name or f"Combined Journalist Cuts - {video_filename}"
@@ -242,12 +286,23 @@ def _build_single_combined_sequence(children, cuts, video_path, video_filename,
     track = ET.SubElement(video, "track")
 
     master_id = "file-master-combined"
-    _add_master_file_reference(children, master_id, video_filename, video_path,
-                               video_duration, effective_fps, timebase, ntsc, start_timecode)
+    _add_master_file_reference(
+        children,
+        master_id,
+        video_filename,
+        video_path,
+        video_duration,
+        effective_fps,
+        timebase,
+        ntsc,
+        start_timecode,
+    )
 
     current_start = 0
     for i, seg in enumerate(all_segs, 1):
-        start_f = seconds_to_frames(float(seg.get("source_in") or seg.get("start", 0)), effective_fps)
+        start_f = seconds_to_frames(
+            float(seg.get("source_in") or seg.get("start", 0)), effective_fps
+        )
         end_f = seconds_to_frames(float(seg.get("source_out") or seg.get("end", 0)), effective_fps)
         dur = end_f - start_f
         if dur <= 0:
@@ -276,8 +331,9 @@ def _build_single_combined_sequence(children, cuts, video_path, video_filename,
     sequence.find("duration").text = str(current_start)
 
 
-def _add_master_file_reference(children, master_id, filename, path, duration,
-                               fps, timebase, ntsc, start_tc):
+def _add_master_file_reference(
+    children, master_id, filename, path, duration, fps, timebase, ntsc, start_tc
+):
     master = ET.SubElement(children, "clipitem", id=master_id.replace("file-", ""))
     ET.SubElement(master, "name").text = filename
     ET.SubElement(master, "duration").text = str(seconds_to_frames(duration, fps))
@@ -300,11 +356,7 @@ def _add_master_file_reference(children, master_id, filename, path, duration,
     ET.SubElement(r2, "ntsc").text = ntsc
 
 
-def create_sequence_from_video(
-    video: "Video",
-    cuts: list[dict[str, Any]],
-    **kwargs
-) -> str:
+def create_sequence_from_video(video: Video, cuts: list[dict[str, Any]], **kwargs) -> str:
     """Convenience wrapper that accepts a Video object directly."""
     metadata = {
         "path": getattr(video, "path", ""),
@@ -320,7 +372,7 @@ create_fcpxml = create_sequence
 
 # Re-export the strict Premiere-oriented XMEML generator from the dedicated module
 # so that existing imports from minicat.ai.fcpxml_exporter continue to work.
-from .xmeml_exporter import generate_xmeml, create_xmeml  # noqa: F401
+from .xmeml_exporter import create_xmeml, generate_xmeml  # noqa: F401, E402
 
 
 # ---------------------------------------------------------------------------

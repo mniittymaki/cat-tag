@@ -34,16 +34,17 @@ multi-source relinking in Premiere when no narration/voiceover is present).
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-import subprocess
 import json
-from xml.dom import minidom
+import subprocess
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from pathlib import Path
+from typing import Any
+from xml.dom import minidom
 
 # Note: Some helpers are temporarily imported from app.py or xmeml_exporter during migration.
 # They will be moved here over time.
+
 
 def _build_mixed_sources_xmeml(
     ver: dict[str, Any],
@@ -71,10 +72,14 @@ def _build_mixed_sources_xmeml(
 
     root = ET.Element("xmeml", version="5")
     project = ET.SubElement(root, "project")
-    ET.SubElement(project, "name").text = f"AI Multi - {ver.get('title', ver.get('version_id', 'Cut'))}"
+    ET.SubElement(
+        project, "name"
+    ).text = f"AI Multi - {ver.get('title', ver.get('version_id', 'Cut'))}"
     children = ET.SubElement(project, "children")
     sequence = ET.SubElement(children, "sequence", id="sequence-1")
-    ET.SubElement(sequence, "name").text = f"AI Multi - {ver.get('title', ver.get('version_id', 'Cut'))}"
+    ET.SubElement(
+        sequence, "name"
+    ).text = f"AI Multi - {ver.get('title', ver.get('version_id', 'Cut'))}"
 
     summary = (ver.get("narrative_summary") or "").strip()
     if summary:
@@ -123,18 +128,19 @@ def _build_mixed_sources_xmeml(
     audio_tracks = []
     for i in range(num_audio_tracks):
         t = ET.SubElement(
-            aseq, "track",
+            aseq,
+            "track",
             premiereTrackType="Mono",
             TL_SQTrackAudioKeyframeStyle="0",
             TL_SQTrackShy="0",
             MZ_TrackTargeted="1",
             TL_SQTrackExpandedHeight="41",
             currentExplodedTrackIndex=str(i),
-            totalExplodedTrackCount=str(num_audio_tracks)
+            totalExplodedTrackCount=str(num_audio_tracks),
         )
         audio_tracks.append(t)
 
-    atrack = audio_tracks[0] if audio_tracks else None
+    audio_tracks[0] if audio_tracks else None
 
     # Accumulate real timeline in *seconds* (independent of per-source fps).
     # Then convert positions to the sequence timebase frames.
@@ -268,9 +274,13 @@ def _build_mixed_sources_xmeml(
         probed_dur_f = meta.get("dur_f", 0)
         if fid not in debug_logged_fids:
             if use_pack_for_fid.get(fid, False):
-                print(f"[XMEML] Using PACK (bad high labels for this source, content remapped to valid) for {meta['fname']} (fid={fid}): raw_in={raw_in:.2f} -> in_f={in_f} (file dur {probed_dur_f})")
+                print(
+                    f"[XMEML] Using PACK (bad high labels for this source, content remapped to valid) for {meta['fname']} (fid={fid}): raw_in={raw_in:.2f} -> in_f={in_f} (file dur {probed_dur_f})"
+                )
             else:
-                print(f"[XMEML] Using DIRECT (exact label time from script/version * tb) for {meta['fname']} (fid={fid}): raw_in={raw_in:.2f} -> in_f={in_f} (file dur {probed_dur_f})")
+                print(
+                    f"[XMEML] Using DIRECT (exact label time from script/version * tb) for {meta['fname']} (fid={fid}): raw_in={raw_in:.2f} -> in_f={in_f} (file dur {probed_dur_f})"
+                )
             debug_logged_fids.add(fid)
 
         # Compute the full source file dur (probed or max needed) -- set clipitem<duration> to this
@@ -281,7 +291,10 @@ def _build_mixed_sources_xmeml(
         start_f = _seconds_to_frames(current_seq_sec, timebase)
         end_f = _seconds_to_frames(current_seq_sec + clip_dur_sec, timebase)
 
-        src_label = seg.get("source_label") or f"C{ordered_sources.index(sp) + 1 if sp in ordered_sources else '?'}"
+        src_label = (
+            seg.get("source_label")
+            or f"C{ordered_sources.index(sp) + 1 if sp in ordered_sources else '?'}"
+        )
         seg_name = f"{src_label} - {meta['fname']}"
         reason = (seg.get("reason") or seg.get("text") or "").strip()
 
@@ -425,7 +438,9 @@ def _build_mixed_sources_xmeml(
                 fr = ET.SubElement(f, "rate")
                 ET.SubElement(fr, "timebase").text = str(file_timebase)
                 ET.SubElement(fr, "ntsc").text = ntsc
-                file_dur = max(meta.get("dur_f", 0), max_out_f_per_fid.get(fid, meta.get("dur_f", 0)))
+                file_dur = max(
+                    meta.get("dur_f", 0), max_out_f_per_fid.get(fid, meta.get("dur_f", 0))
+                )
                 if file_dur > 0:
                     ET.SubElement(f, "duration").text = str(file_dur)
                 # One-time-per-source summary (the per-clip version was too noisy)
@@ -466,19 +481,27 @@ def _build_mixed_sources_xmeml(
         if not meta_for_fid:
             continue
         # Always DIRECT now (in/out numbers exactly match script/TXT label times * tb for every camera).
-        print(f"  fid={fid} {meta_for_fid.get('fname', '?')}: DIRECT (exact label time from script/version * tb)")
-        print(f"           declared file_dur={max_out_f_per_fid[fid]}  (real probed={meta_for_fid.get('dur_f', 0)})")
+        print(
+            f"  fid={fid} {meta_for_fid.get('fname', '?')}: DIRECT (exact label time from script/version * tb)"
+        )
+        print(
+            f"           declared file_dur={max_out_f_per_fid[fid]}  (real probed={meta_for_fid.get('dur_f', 0)})"
+        )
     print("[XMEML] ============================================================")
 
-    print(f"[XMEML] Multi export done: {len(ordered_sources)} sources, {clip_idx-1} clips. Per-source: DIRECT (exact label times when sane) or PACK (bad high labels only for that source) + file ref style (full only first use) + 00:00:00:00. Matches the 11:10 working exports.")
+    print(
+        f"[XMEML] Multi export done: {len(ordered_sources)} sources, {clip_idx - 1} clips. Per-source: DIRECT (exact label times when sane) or PACK (bad high labels only for that source) + file ref style (full only first use) + 00:00:00:00. Matches the 11:10 working exports."
+    )
 
     rough_string = ET.tostring(root, encoding="unicode")
     reparsed = minidom.parseString(rough_string)
     return reparsed.toprettyxml(indent="  ")
 
+
 # ---------------------------------------------------------------------------
 # Helper functions (being extracted from the legacy code)
 # ---------------------------------------------------------------------------
+
 
 def get_audio_characteristics(source_path: str | Path) -> dict[str, Any]:
     """Probe audio channel count and sample rate for a source (or VO) file.
@@ -486,8 +509,15 @@ def get_audio_characteristics(source_path: str | Path) -> dict[str, Any]:
     """
     try:
         cmd = [
-            "ffprobe", "-v", "quiet", "-print_format", "json",
-            "-show_streams", "-select_streams", "a:0", str(source_path)
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-select_streams",
+            "a:0",
+            str(source_path),
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=True)
         data = json.loads(result.stdout or "{}")
@@ -532,7 +562,7 @@ def prepare_director_sources(
     This logic is being extracted so it can be shared between
     multi_xmeml_exporter and narrative_vo_exporter.
     """
-    from minicat.ai.xmeml_exporter import get_video_timebase, get_media_start_offset_and_duration
+    from minicat.ai.xmeml_exporter import get_media_start_offset_and_duration, get_video_timebase
 
     # Derive timebase: prefer the *most common* across all unique sources
     # (not blindly the first clip that appears in the AI story order).
@@ -568,11 +598,15 @@ def prepare_director_sources(
             timebase = 25
 
     if timebase > 120 or timebase < 1:
-        print(f"[Multi XMEML] Warning: insane sequence timebase {timebase} detected, defaulting to 25")
+        print(
+            f"[Multi XMEML] Warning: insane sequence timebase {timebase} detected, defaulting to 25"
+        )
         timebase = 25
 
     if len(unique_tbs) > 1:
-        print(f"[Multi XMEML] Note: mixed native frame rates detected {sorted(unique_tbs)}. Using most common {timebase} as sequence timeline rate.")
+        print(
+            f"[Multi XMEML] Note: mixed native frame rates detected {sorted(unique_tbs)}. Using most common {timebase} as sequence timeline rate."
+        )
 
     # (Optional note about mixed rates is logged inside the per-source probe loop below when we see varying src_timebase values)
 
@@ -592,10 +626,19 @@ def prepare_director_sources(
         # Probe resolution + timebase (more robust command)
         try:
             res_cmd = [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_streams", "-select_streams", "v:0", sp
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_streams",
+                "-select_streams",
+                "v:0",
+                sp,
             ]
-            res_result = subprocess.run(res_cmd, capture_output=True, text=True, timeout=10, check=True)
+            res_result = subprocess.run(
+                res_cmd, capture_output=True, text=True, timeout=10, check=True
+            )
             res_data = json.loads(res_result.stdout or "{}")
             w = h = r = None
             for stream in res_data.get("streams", []):
@@ -665,12 +708,13 @@ def _get_premiere_label_color(source_key: str) -> str:
 
     key = source_key.strip().lower()
     hash_val = hash(key) % 10
-    return str(hash_val + 1)   # Premiere labels 1-10
+    return str(hash_val + 1)  # Premiere labels 1-10
 
 
 # ---------------------------------------------------------------------------
 # Main exported function for #2 (Multi - AI Director without narrations)
 # ---------------------------------------------------------------------------
+
 
 def export_ai_director_multi_xmeml(
     ver: dict[str, Any],
@@ -701,6 +745,7 @@ def export_ai_director_multi_xmeml(
         try:
             from minicat.core.video import repair_director_version_with_transcripts
             from minicat.ui.app import get_state
+
             st = get_state()
             cat_root = getattr(st, "catalog_root", None) if st else None
             vids = getattr(st, "videos", None) or []
@@ -728,11 +773,13 @@ def export_ai_director_multi_xmeml(
         else:
             # Always create a new dated subfolder inside default library for this export's files
             from minicat.core.settings import create_export_subfolder
-            suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:40] }"
+
+            suggestion = f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:40]}"
             export_dir = create_export_subfolder(suggestion)
 
-        raw_name = f"AI_Multi_{ver.get('version_id', 'X')}_{ (ver.get('title') or 'Cut')[:30] }"
+        raw_name = f"AI_Multi_{ver.get('version_id', 'X')}_{(ver.get('title') or 'Cut')[:30]}"
         from minicat.core.settings import sanitize_for_filesystem
+
         name = sanitize_for_filesystem(raw_name, max_len=80)
         out_name = f"{name}.xml"
         out_path = export_dir / out_name
@@ -741,6 +788,7 @@ def export_ai_director_multi_xmeml(
         # This ensures "AI DIRECTOR — MULTI-CLIP SCRIPT.txt" is always produced for AI Multi XML exports.
         try:
             from minicat.ui.app import export_ai_director_multi_clip_script
+
             export_ai_director_multi_clip_script(ver, target_dir=export_dir)
         except Exception:
             # UI may not be importable in all contexts (e.g. tests, scripts); safe to ignore
@@ -751,21 +799,24 @@ def export_ai_director_multi_xmeml(
         if len(source_list) == 1:
             cut_segments = []
             for seg in segs:
-                cut_segments.append({
-                    "source_in": seg.get("source_in") or seg.get("start"),
-                    "source_out": seg.get("source_out") or seg.get("end"),
-                    "text": seg.get("text", ""),
-                    "reason": seg.get("reason", "")
-                })
+                cut_segments.append(
+                    {
+                        "source_in": seg.get("source_in") or seg.get("start"),
+                        "source_out": seg.get("source_out") or seg.get("end"),
+                        "text": seg.get("text", ""),
+                        "reason": seg.get("reason", ""),
+                    }
+                )
 
             detected_timebase = get_video_timebase(source_list[0])
             from minicat.ai.xmeml_exporter import generate_xmeml
+
             generate_xmeml(
                 cut_segments=cut_segments,
                 source_video_path=source_list[0],
                 output_path=out_path,
                 sequence_name=f"AI Multi Cut - {ver.get('title', ver.get('version_id'))}",
-                narrative_summary=ver.get('narrative_summary'),
+                narrative_summary=ver.get("narrative_summary"),
                 timebase=detected_timebase,
             )
             return out_path
@@ -778,7 +829,9 @@ def export_ai_director_multi_xmeml(
 
             # Debug: show what we actually detected from the files
             for sp, meta in source_meta.items():
-                print(f"  - {meta['fname']}: {meta['width']}x{meta['height']}, {meta['audio_ch']}ch, tb={meta['src_timebase']}")
+                print(
+                    f"  - {meta['fname']}: {meta['width']}x{meta['height']}, {meta['audio_ch']}ch, tb={meta['src_timebase']}"
+                )
 
             pretty_xml = _build_mixed_sources_xmeml(
                 ver=ver,
@@ -795,5 +848,6 @@ def export_ai_director_multi_xmeml(
     except Exception as ex:
         print(f"[Multi XMEML #2] Export failed: {ex}")
         import traceback
+
         traceback.print_exc()
         return None
