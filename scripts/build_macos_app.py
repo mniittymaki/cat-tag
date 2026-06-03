@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-Build a standalone macOS .app bundle for CAT+TAG.
+OPTIONAL: Build a local macOS .app bundle for personal use only.
 
-This produces a native-looking macOS application you can drag to /Applications.
+The maintainer runs CAT+TAG exclusively via `uv run minicat` from source
+and does NOT want or distribute any "official" pre-built app (macOS .app,
+iOS, or otherwise). This script is for advanced users who want to experiment
+with a double-clickable bundle on their own machine.
 
-Recommended usage (ensures correct virtualenv + deps):
+It is experimental, unsigned, and comes with many caveats (Gatekeeper,
+large size, ffmpeg still required, etc.). Do not treat it as a supported
+distribution method.
+
+Recommended (if you still want to try it):
     uv run python scripts/build_macos_app.py
-
-Alternative (if you have activated the .venv):
-    uv pip install pyinstaller
-    python scripts/build_macos_app.py
 """
 
 import subprocess
@@ -23,7 +26,11 @@ APP_NAME = "CAT+TAG"
 
 
 def main():
-    print("Building CAT+TAG macOS app bundle...")
+    print("=== OPTIONAL local macOS bundle build (personal use only) ===")
+    print("Maintainer is happy with `uv run minicat` (source).")
+    print("No official iOS, macOS, or any pre-built app is provided or wanted.")
+    print("This is experimental/unsigned and not a supported distribution path.\n")
+    print("Building CAT+TAG macOS app bundle (if you really want one)...")
     print("This may take a minute or two.\n")
 
     # Robustness: ensure PyInstaller is available. Prefer uv environment.
@@ -127,16 +134,19 @@ def main():
     app_path = PROJECT_ROOT / "dist" / f"{APP_NAME}.app"
     print(f"\n✅ Built: {app_path}")
     print()
-    print("Important notes for distribution:")
-    print("  • Drag CAT+TAG.app to /Applications (or your Applications folder)")
-    print("  • Users will still need ffmpeg installed (brew install ffmpeg)")
-    print("  • On first run, macOS may show a Gatekeeper warning if unsigned")
-    print("  • For easy sharing with others, you will need to sign + notarize the app")
+    print("Important notes:")
+    print("  • This bundle is NOT official and NOT supported.")
+    print("  • Maintainer prefers and uses: uv run minicat (source install)")
+    print("  • Drag to /Applications only for your own personal testing.")
+    print("  • You MUST have ffmpeg on PATH (brew install ffmpeg).")
+    print("  • Expect Gatekeeper warnings (unsigned/ad-hoc). Right-click → Open")
+    print("    or: xattr -cr " + str(app_path))
+    print("  • Do not distribute this bundle.")
     print()
-    print("To test the built app:")
+    print("To test (your own risk):")
     print(f"  open {app_path}")
     print()
-    print("Next time, run with: uv run python scripts/build_macos_app.py  (recommended)")
+    print("Again: the recommended way is `uv run minicat` from a git clone.")
 
 
 def _generate_icns_from_png(png_path: Path, icns_path: Path) -> None:
