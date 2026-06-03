@@ -23,11 +23,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = [
-  "ruff>=0.4",
-  "pytest>=8.0",
-  "mypy>=1.10",
-]
 tts = [
   "piper-tts>=1.2.0",   # Fully offline high-quality neural TTS (local Piper voices). Used for AI Director voiceovers.
 ]
